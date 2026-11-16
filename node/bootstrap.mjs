@@ -1,0 +1,6 @@
+#!/usr/bin/env node
+import fs from 'node:fs';import path from 'node:path';import {spawn} from 'node:child_process';import {fileURLToPath} from 'node:url';
+const configFile=process.argv[2];if(!configFile)throw Error('private_config_required');const config=JSON.parse(fs.readFileSync(configFile,'utf8'));const initial=fileURLToPath(new URL('..',import.meta.url));let child;
+for(const name of ['SIGTERM','SIGINT'])process.on(name,()=>child?.kill(name));
+for(;;){let directory=initial;const stateFile=path.join(config.state_directory,'state.json');if(fs.existsSync(stateFile)){const update=JSON.parse(fs.readFileSync(stateFile,'utf8')).update;if(update?.current_code){directory=path.join(config.install_directory??path.join(config.state_directory,'runtime'),String(update.current_code));const installed=JSON.parse(fs.readFileSync(path.join(directory,'.installed.json'),'utf8'));if(installed.sha256!==update.sha256||installed.version_code!==update.current_code)throw Error('installed_version_pointer_invalid');}}
+const code=await new Promise((resolve,reject)=>{child=spawn(process.execPath,[path.join(directory,'node/main.mjs'),configFile,...process.argv.slice(3)],{stdio:'inherit',windowsHide:true});child.on('error',reject);child.on('exit',code=>resolve(code??1));});if(code!==75){process.exitCode=code;break;}}

@@ -1,0 +1,3 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {armTimeout} from '../node/timers.mjs';
+test('requested long timeout chains physical Node delays instead of clamping to1ms',t=>{t.mock.timers.enable({apis:['setTimeout','Date']});let fired=false;armTimeout(()=>{fired=true;},2147483647+1000);t.mock.timers.tick(2147483647);assert.equal(fired,false);t.mock.timers.tick(999);assert.equal(fired,false);t.mock.timers.tick(1);assert.equal(fired,true);});
+test('zero timeout is disabled and cancelled long timer cannot fire',t=>{t.mock.timers.enable({apis:['setTimeout','Date']});let n=0;armTimeout(()=>n++,0);const stop=armTimeout(()=>n++,2147483647+1);stop();t.mock.timers.tick(2147483647+100);assert.equal(n,0);});

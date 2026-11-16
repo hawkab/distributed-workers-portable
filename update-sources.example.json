@@ -1,0 +1,18 @@
+[
+  {
+    "id": "gitea",
+    "kind": "gitea",
+    "url": "https://gitea.invalid/api/v1/repos/distributed-workers/worker-portable/releases/latest"
+  },
+  {
+    "id": "gitflic",
+    "kind": "channel",
+    "url": "https://gitflic.ru/project/distributed-workers/worker-portable/blob/raw?file=stable.json&commit=release-channel"
+  },
+  {
+    "id": "github",
+    "kind": "manifest",
+    "url": "https://github.com/hawkab/distributed-workers-portable/releases/latest/download/portable-manifest.json",
+    "archive_url_template": "https://github.com/hawkab/distributed-workers-portable/releases/download/{tag}/fleet-worker-portable.zip"
+  }
+]

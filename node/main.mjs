@@ -1,0 +1,7 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import {Updater} from './updater.mjs';
+import {Worker} from './worker.mjs';
+const file=process.argv[2];if(!file)throw new Error('Usage: node node/main.mjs PRIVATE_CONFIG.json [--once]');
+const config=JSON.parse(fs.readFileSync(file,'utf8'));const worker=new Worker(config);worker.store.lock();const updater=new Updater(config,worker.store);let nextUpdate=(worker.store.data.update_check_at??0)+(config.update_poll_seconds??900)*1000;let stopping=false;for(const signal of ['SIGTERM','SIGINT'])process.on(signal,()=>{stopping=true;});
+try{do{try{const busy=await worker.tick();if(Date.now()>=nextUpdate){worker.store.data.update_check_at=Date.now();worker.store.save();nextUpdate=Date.now()+(config.update_poll_seconds??900)*1000;const update=await updater.check();if(update.state==='installed'){process.exitCode=75;break;}}if(!busy&&process.argv.includes('--once'))break;if(!busy)await new Promise(r=>setTimeout(r,config.poll_ms??5000));}catch(e){console.error(JSON.stringify({event:'worker_pending',code:e.status?'gateway_'+e.status:'transport_or_task_pending'}));if(process.argv.includes('--once')){process.exitCode=1;break;}await new Promise(r=>setTimeout(r,config.poll_ms??5000));}}while(!stopping&&!process.argv.includes('--once'));}finally{worker.store.unlock?.();}

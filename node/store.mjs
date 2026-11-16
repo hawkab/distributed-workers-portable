@@ -1,0 +1,12 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+export class Store {
+  constructor(directory) { this.directory=directory;fs.mkdirSync(directory,{recursive:true,mode:0o700});this.path=path.join(directory,'state.json');this.data=fs.existsSync(this.path)?JSON.parse(fs.readFileSync(this.path,'utf8')):{schema:1,outbox:{},transfers:{},checkpoints:{}};this.data.job_artifacts??={};this.data.quarantine??={}; }
+  save() { const temp=this.path+'.'+crypto.randomUUID();const fd=fs.openSync(temp,'wx',0o600);try{fs.writeFileSync(fd,JSON.stringify(this.data));fs.fsyncSync(fd);}finally{fs.closeSync(fd);}fs.renameSync(temp,this.path);let dir;try{dir=fs.openSync(this.directory,'r');fs.fsyncSync(dir);}catch(e){if(!['EPERM','EINVAL','EISDIR','ENOTSUP'].includes(e.code))throw e;}finally{if(dir!==undefined)fs.closeSync(dir);} }
+  lock() {const lock=path.join(this.directory,'worker.lock');for(;;){try{fs.writeFileSync(lock,JSON.stringify({pid:process.pid}),{flag:'wx',mode:0o600});this.unlock=()=>{try{if(JSON.parse(fs.readFileSync(lock,'utf8')).pid===process.pid)fs.unlinkSync(lock);}catch{}};return;}catch(e){if(e.code!=='EEXIST')throw e;let owner;try{owner=JSON.parse(fs.readFileSync(lock,'utf8'));process.kill(owner.pid,0);}catch(err){if(err.code==='ESRCH'){fs.unlinkSync(lock);continue;}throw new Error('worker_state_locked');}throw new Error('worker_state_locked');}} }
+  rememberArtifact(job,ref){this.data.job_artifacts[job.id]??={};this.data.job_artifacts[job.id][ref.artifact_id]=ref;this.save();}
+  quarantine(attempt,failure){const item=this.data.outbox[attempt];if(!item)return;this.data.quarantine[attempt]={completion:item,failure,quarantined_at:new Date().toISOString()};delete this.data.outbox[attempt];this.save();}
+  putCompletion(job,body) {this.data.outbox[job.attempt_id]={job_id:job.id,body};this.save();}
+  acknowledge(attempt,receipt) {const item=this.data.outbox[attempt];if(!item||receipt.job_id!==item.job_id||receipt.attempt_id!==attempt||!(receipt.committed===true||receipt.candidate_saved===true))throw new Error('completion_ack_mismatch');delete this.data.outbox[attempt];delete this.data.job_artifacts[item.job_id];delete this.data.checkpoints[item.job_id];for(const key of Object.keys(this.data.transfers))if(key.startsWith(attempt+':'))delete this.data.transfers[key];for(const [key,value] of Object.entries(this.data.completion_transfers??{}))if(value.attempt_id===attempt||key.startsWith(attempt+':'))delete this.data.completion_transfers[key];this.save();}
+}
