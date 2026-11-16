@@ -5,6 +5,7 @@ import {Client} from './client.mjs';
 import {Transfer} from './transfer.mjs';
 import {normalizeRequest,enforceNetwork} from './request.mjs';
 import {javascript} from './javascript.mjs';
+import {collectProfile} from './hardware.mjs';
 import {prepareCompletion} from './completion.mjs';
 export class Worker {
  constructor(config,{store=new Store(config.state_directory),client=new Client(config)}={}) {
@@ -14,9 +15,11 @@ export class Worker {
   if(config.trusted_javascript===true)this.capabilities.push('javascript','javascript.portable.v1');
  }
  async tick() {
+  const profile=()=>this.client.setProfile(collectProfile(this.capabilities,this.store.directory));
+  profile();if(!this.client.connected)await this.client.connect(this.store);
   await this.client.flush(this.store);
-  await this.client.request('POST','/v1/workers/heartbeat',{json:{worker_id:this.client.workerId,version_code:this.version.code,version_name:this.version.name,capabilities:this.capabilities,abis:[process.arch],state:'idle'}});
-  const claimed=await this.client.request('POST','/v1/jobs/claim',{json:{worker_id:this.client.workerId,capabilities:this.capabilities}});
+  profile();await this.client.request('POST','/v1/workers/heartbeat',{json:{worker_id:this.client.workerId,version_code:this.version.code,version_name:this.version.name,capabilities:this.capabilities,abis:[process.arch],state:'idle'}});
+  profile();const claimed=await this.client.request('POST','/v1/jobs/claim',{json:{worker_id:this.client.workerId,capabilities:this.capabilities}});
   if(!claimed){if(this.store.data.active){delete this.store.data.active;this.store.save();}return false;}
   await this.execute(claimed.job);await this.client.flush(this.store);return true;
  }

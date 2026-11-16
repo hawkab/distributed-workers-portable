@@ -32,7 +32,7 @@ jobs:
           node-version: '24'
           package-manager-cache: false
       - name: Native Node execution and streaming tests
-        run: node --test tests/node.test.mjs
+        run: node --test tests/node.test.mjs tests/node-profile.test.mjs
 
   release:
     needs: node_conformance

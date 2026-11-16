@@ -2,12 +2,11 @@
 
 Node.js 24+ runs on Linux, Windows and supported CPU architectures. PHP 8.2+ is a CLI/cron adapter for shared hosting. Both implement `sha256`, `http.request` and streamed binary artifacts. The common text operation uses NFC and Android’s exact whitespace/space-character union; U+0085/U+FEFF remain literal. Both compute operations require a string `input.text`. Node implements `text.normalize`; PHP advertises it only when `intl` is installed. PHP does not advertise JavaScript.
 
-Use one backend, one worker ID and a private state directory per installation. Keep the device token and all deployment addresses in an owner-readable configuration outside this repository.
+Use one backend and a private state directory per installation. A device/enrollment token is enough for a new installation: the first connection assigns a stable server ID and durably saves it before any heartbeat, claim or completion. Existing device tokens retain their IDs; an existing `worker_id` remains supported. Retrying a connection with the same token recovers the same identity after a lost response. Changing identity while local work is pending is refused and preserves its state. Keep the device token and all deployment addresses in an owner-readable configuration outside this repository.
 
 ```json
 {
   "gateway": "https://gateway.example.invalid",
-  "worker_id": "configure-privately",
   "token": "configure-privately",
   "state_directory": "/var/lib/portable-worker",
   "trusted_javascript": false,
@@ -15,6 +14,8 @@ Use one backend, one worker ID and a private state directory per installation. K
   "update_poll_seconds": 900
 }
 ```
+
+Connections, worker heartbeats and claims carry `X-Worker-Profile`, a base64url JSON header with schema 1, exact advertised capabilities and numeric resource fields. CPU availability applies visible affinity/cgroup quotas; RAM applies visible cgroup/runtime limits, including Node's actual V8 heap headroom and PHP `memory_limit`. Disk space describes the state directory's filesystem. GPU VRAM is reported where Linux DRM exposes it; compute units and unified memory remain `null` when unknown. CUDA core counts are not inferred from GPU models. An unavailable GPU probe reports `unknown`, not `none`. Discovery failures leave nullable values and do not prevent ordinary work. Profiles contain no hostnames, models or serial numbers. Devices use only their own token; administrative enrollment creation and other workers' data are outside this runtime.
 
 Start Node with `node node/bootstrap.mjs /private/worker.local.json`. On shared hosting, schedule `php php/bootstrap.php /private/worker.local.json --once` using the provider's cron. The PHP runtime needs `curl`, `openssl`, `zlib` and `Phar`; `intl` is optional. A provider's actual wall-time allowance may be supplied as `host_window_seconds`. It is a resumable execution window, not a task deadline. PHP's `max_execution_time` has platform-dependent CPU/wall-time semantics; do not assume it describes the hosting provider's cron limit.
 
