@@ -55,3 +55,65 @@ PHP_BINARY=/usr/bin/php node --test tests/*.test.mjs
 ```
 
 The first command uses an already installed official `php:8.3-apache` Docker image when `PHP_BINARY` is absent. CI uses native PHP 8.2 with no Docker socket. Tests exercise 64 MiB binary transfers, bounded memory, lost ACKs, resumed ranges, cancellation, real PHP execution windows, durable outboxes, redirect credential handling, compressed entity bytes and signed updates. They do not contact deployment services or public release APIs.
+
+## Opt-in native programs (Node only)
+
+The `command.run` backend executes operator-provisioned programs without adding
+application modules to the worker. It is disabled when `commands` is absent.
+Configure opaque IDs in the private worker configuration:
+
+```json
+{"commands":{"transform-v1":{
+  "executable":"/opt/application/bin/transform",
+  "argv":[],
+  "sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "capability":"program.transform.v1",
+  "replay":"never",
+  "env":{"PATH":"/usr/bin:/bin"},
+  "media_type":"application/x-tar",
+  "name":"result.tar",
+  "stderr_bytes":16384
+}}}
+```
+
+The executable must be an available executable file with the exact configured
+SHA-256. The worker advertises `command.run.v1` and the configured version
+capabilities only for currently usable entries. Idle admission caches the exact
+file identity/size/mtime/ctime fingerprint; each new launch hashes the opened
+executable again and checks its fd/stat stability.
+Provision binaries and dependencies separately under operator-controlled immutable
+paths. No command or application binary is downloaded from a task. A job is
+`{operation:"command.run",input:{program:"transform-v1",payload:{...}},required_capabilities:["command.run.v1","artifact.stream","program.transform.v1"]}`.
+There is no task-supplied path, argv, environment or shell. The fixed process
+receives only `payload` as UTF-8 JSON stdin. Its environment is empty except for
+Windows SystemRoot and explicitly configured fixed values, allowing dependencies
+without inheriting worker credentials/configuration. Do not put secrets in the
+public program manifest or task payload.
+
+Stdout is streamed byte-for-byte to a gateway artifact with bounded memory and
+backpressure; no local stdout file is created. `result` contains `artifact`,
+`exit_code` (null when signalled), optional `signal`/`error_code`, and
+`stderr:{tail_base64,bytes,retained_bytes,truncated}`. Stderr is a bounded tail,
+separate from the data, and is never logged in full. Nonzero exit produces a
+failed completion retaining its output. Cancellation or lease loss kills the
+process tree and seals captured output where possible. Lost chunk/seal ACKs retry
+the same bytes; durable completed output/exit metadata and sealed results resume
+without starting the program again. Only the matching completion ACK clears the
+command record.
+
+Interrupted started execution is uncertain with the default `replay:"never"`.
+Set `safe` only for independently repeatable work with application idempotency.
+Recovery then starts a new retained upload generation; it never appends new
+process output to an old partial stream. There is no native incremental
+checkpoint channel or cross-host process migration in this baseline. Prefer one
+independent resumable unit per job; a job has no added overall deadline.
+
+A native process is trusted operator code with its OS account's access. It is
+not a sandbox, and its HTTP calls do not use the worker effect journal or HTTP
+host policy. Nonempty `job.network` is rejected. A worker with a nonempty local
+network allow-policy does not advertise native commands. Supply real restrictions
+through OS/container isolation or the program's own validated inputs. Process
+trees are killed as a Unix process group or with Windows taskkill; programs must
+not deliberately detach from that supervision. Hard worker/host crashes require
+OS service/container lifecycle supervision. PHP and Android keep their existing
+capabilities and do not claim native command work.

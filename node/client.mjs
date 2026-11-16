@@ -24,7 +24,7 @@ export class Client {
  async connect(store){
   const persisted=store.data.worker_identity?.worker_id;const pendingIds=[...new Set(Object.values(store.data.outbox??{}).map(v=>v.body?.worker_id).filter(v=>typeof v==='string'&&v))];
   const previous=persisted??this.workerId??(pendingIds.length===1?pendingIds[0]:undefined);
-  const pending=Object.keys(store.data.outbox??{}).length>0||!!store.data.active||['transfers','checkpoints','job_artifacts','completion_transfers'].some(k=>Object.keys(store.data[k]??{}).length>0);
+  const pending=Object.keys(store.data.outbox??{}).length>0||!!store.data.active||['transfers','checkpoints','job_artifacts','completion_transfers','command_runs'].some(k=>Object.keys(store.data[k]??{}).length>0);
   if(pending&&(!previous||pendingIds.some(id=>id!==previous)))throw Error('pending_worker_identity_unknown_or_conflicting');
   if(previous)this.workerId=previous;
   const receipt=await this.request('POST','/v1/workers/connect',{json:{}});

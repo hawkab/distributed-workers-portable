@@ -7,14 +7,17 @@ import {normalizeRequest,enforceNetwork} from './request.mjs';
 import {javascript} from './javascript.mjs';
 import {collectProfile} from './hardware.mjs';
 import {prepareCompletion} from './completion.mjs';
+import {Commands} from './command.mjs';
 export class Worker {
  constructor(config,{store=new Store(config.state_directory),client=new Client(config)}={}) {
   this.config=config;this.version=JSON.parse(fs.readFileSync(new URL('../VERSION.json',import.meta.url),'utf8'));
-  this.store=store;this.client=client;this.transfer=new Transfer(client,store,config);
+  this.store=store;this.client=client;this.transfer=new Transfer(client,store,config);this.commands=new Commands(config,client,store);
   this.capabilities=['sha256','text.normalize','http.request','artifact.stream'];
   if(config.trusted_javascript===true)this.capabilities.push('javascript','javascript.portable.v1');
+  this.baseCapabilities=[...this.capabilities];
  }
  async tick() {
+  this.capabilities=[...new Set([...this.baseCapabilities,...this.commands.capabilities()])];
   const profile=()=>this.client.setProfile(collectProfile(this.capabilities,this.store.directory));
   profile();if(!this.client.connected)await this.client.connect(this.store);
   await this.client.flush(this.store);
@@ -54,7 +57,8 @@ export class Worker {
     switch(job.operation){
      case'sha256':case'text.normalize':result=builtin(job.operation,job.input);break;
      case'http.request':result=await host('http.request',job.input);break;
-     case'javascript':if(!this.config.trusted_javascript)throw Error('javascript_disabled');result=await javascript(job,this.store.data.checkpoints[job.id]??null,host,{signal:controller.signal});break;
+     case'command.run':result=await this.commands.execute(job,{signal:controller.signal,progress:p=>{progress=p;}});if(result.artifact)remember(result.artifact);break;
+    case'javascript':if(!this.config.trusted_javascript)throw Error('javascript_disabled');result=await javascript(job,this.store.data.checkpoints[job.id]??null,host,{signal:controller.signal});break;
      default:throw Error('unsupported_operation');
     }
    } catch(e) {
