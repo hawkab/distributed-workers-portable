@@ -19,6 +19,13 @@ Connections, worker heartbeats and claims carry `X-Worker-Profile`, a base64url 
 
 Start Node with `node node/bootstrap.mjs /private/worker.local.json`. On shared hosting, schedule `php php/bootstrap.php /private/worker.local.json --drain` using the provider's cron. Drain runs process ready tasks until the queue is empty; `--once` remains available for one task. An overlapping cron invocation leaves before reading mutable state, while the existing process retains its lock. Keep code, credentials and state outside the website's document root. The PHP runtime needs `curl`, `openssl`, `zlib` and `Phar`; `intl` is optional. A provider's actual wall-time allowance may be supplied as `host_window_seconds`. It is a resumable execution window, not a task deadline. PHP's `max_execution_time` has platform-dependent CPU/wall-time semantics; do not assume it describes the hosting provider's cron limit.
 
+A stop signal closes task admission, drains any already claimed task and
+preserves its durable completion. It
+also takes precedence over an update restart: a runtime exit 75 cannot start a
+new child after the bootstrap has received SIGTERM/SIGINT. No new update check
+is started after stop; an update already in progress may finish its atomic
+installation before the process exits normally.
+
 The bootstrap selects the last verified installed version. A Node child exit 75 reloads that version. PHP cron loads it at the next invocation; a PHP daemon supervisor should restart exit 75. A service supervisor must allow healthy long jobs to drain or retain their durable state rather than impose an unrelated startup/job timeout.
 
 `trusted_javascript: true` adds `javascript` and `javascript.portable.v1`. A task uses synchronous ES5.1 `run(input, resume, ctx)`. `ctx.progress`, `ctx.checkpoint` and `ctx.http.request` are synchronous host calls; legacy global `progress` and `checkpoint` work as well. The Node task process receives no worker token/config/environment. It uses a separate process and Node permissions as protection against accidental access. **Node `vm` and Node permissions are not security boundaries for hostile code.** Enable this capability only for trusted operator code; use a separate OS account/container with its own restrictions for stronger isolation. See the [Node security guidance](https://nodejs.org/api/permissions.html).

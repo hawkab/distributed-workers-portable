@@ -10,18 +10,21 @@ import {prepareCompletion} from './completion.mjs';
 import {Commands} from './command.mjs';
 export class Worker {
  constructor(config,{store=new Store(config.state_directory),client=new Client(config)}={}) {
-  this.config=config;this.version=JSON.parse(fs.readFileSync(new URL('../VERSION.json',import.meta.url),'utf8'));
+  this.accepting=true;this.config=config;this.version=JSON.parse(fs.readFileSync(new URL('../VERSION.json',import.meta.url),'utf8'));
   this.store=store;this.client=client;this.transfer=new Transfer(client,store,config);this.commands=new Commands(config,client,store);
   this.capabilities=['sha256','text.normalize','http.request','artifact.stream'];
   if(config.trusted_javascript===true)this.capabilities.push('javascript','javascript.portable.v1');
   this.baseCapabilities=[...this.capabilities];
  }
+ stopAdmission(){this.accepting=false;}
  async tick() {
+  if(!this.accepting)return false;
   await this.transfer.proxyPool.refresh();this.capabilities=[...new Set([...this.baseCapabilities,...this.commands.capabilities(),...this.transfer.proxyPool.capabilities()])];
   const profile=()=>this.client.setProfile(collectProfile(this.capabilities,this.store.directory));
   profile();if(!this.client.connected)await this.client.connect(this.store);
   await this.client.flush(this.store);
   profile();await this.client.request('POST','/v1/workers/heartbeat',{json:{worker_id:this.client.workerId,version_code:this.version.code,version_name:this.version.name,capabilities:this.capabilities,abis:[process.arch],state:'idle'}});
+  if(!this.accepting)return false;
   profile();const claimed=await this.client.request('POST','/v1/jobs/claim',{json:{worker_id:this.client.workerId,capabilities:this.capabilities}});
   if(!claimed){if(this.store.data.active){delete this.store.data.active;this.store.save();}return false;}
   await this.execute(claimed.job);await this.client.flush(this.store);return true;
