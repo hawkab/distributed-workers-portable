@@ -29,3 +29,37 @@ function fleet_profile(array $capabilities,string $directory,array $deps=[]):arr
  return ['schema'=>1,'capabilities'=>array_values($capabilities),'resources'=>$resources];
 }
 function fleet_encode_profile(array $profile):string{return rtrim(strtr(base64_encode(json_encode($profile,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR)),'+/','-_'),'=');}
+
+// Optional system discovery cannot disable ordinary HTTP or compute work.
+function fleet_abi():array{try{if(!function_exists('php_uname'))return [];$arch=php_uname('m');return is_string($arch)&&$arch!==''?[$arch]:[];}catch(Throwable){return [];}}
+function fleet_memory_limit_bytes():?int{try{$limit=ini_get('memory_limit');if(!is_string($limit)||!preg_match('/^\s*(\d+)\s*([KMG]?)\s*$/iD',$limit,$m))return null;$bytes=(int)$m[1]*(1024**array_search(strtoupper($m[2]),['','K','M','G'],true));return is_int($bytes)&&$bytes>0?$bytes:null;}catch(Throwable){return null;}}
+function fleet_memory_fits(int $additional):bool{$limit=fleet_memory_limit_bytes();return $limit===null||$additional>=0&&$additional<=max(0,$limit-memory_get_usage(true));}
+// Exact UTF-8 JSON string byte growth, including separators split across chunks.
+function fleet_json_string_bytes(string $part,string $priorTail=''):int{return strlen($part)+5*preg_match_all('/[\x00-\x1f]/',$part)-4*preg_match_all('/[\x08\x09\x0a\x0c\x0d]/',$part)+substr_count($part,'"')+substr_count($part,'\\')+3*(substr_count($priorTail.$part,"\xe2\x80\xa8")+substr_count($priorTail.$part,"\xe2\x80\xa9"));}
+function fleet_json_layout():array{
+ static $layout=null;if($layout!==null)return $layout;
+ $arrayCost=static function(int $n):int{$before=memory_get_usage(false);$v=array_fill(0,$n,null);return memory_get_usage(false)-$before;};
+ $objectCost=static function(int $n):int{$before=memory_get_usage(false);$v=new stdClass();for($i=0;$i<$n;$i++)$v->{'k'.$i}=null;return memory_get_usage(false)-$before;};
+ $before=memory_get_usage(false);$v=str_repeat('x',128);$stringBase=max(0,memory_get_usage(false)-$before-128);unset($v);
+ $a=[];$o=[];foreach([8,16,32,64,128,256,512,1024,2048] as $capacity){$a[$capacity]=$arrayCost($capacity);$o[$capacity]=$objectCost($capacity)-$capacity*$stringBase;}
+ // Small allocator classes have discontinuities. Keep their measured costs;
+ // only extrapolate the stable large-table slot growth beyond those classes.
+ $arraySlot=max(1,intdiv($a[2048]-$a[1024],1024),intdiv($a[1024]-$a[512],512));
+ $mapSlot=max(1,intdiv($o[2048]-$o[1024],1024),intdiv($o[1024]-$o[512],512));
+ return $layout=['arrays'=>$a,'objects'=>$o,'array_slot'=>$arraySlot,'map_slot'=>$mapSlot,'array_base'=>max(0,$a[2048]-2048*$arraySlot),'object_base'=>max(0,$o[2048]-2048*$mapSlot),'string_base'=>$stringBase,'empty_object'=>$objectCost(0)];
+}
+// Budget the actual runtime's decoded container layout before json_decode can
+// fatally exhaust memory. This scans shape only; PHP remains the syntax decoder.
+function fleet_json_allocation_bytes(string $text,?callable $pulse=null):?int{
+ $layout=fleet_json_layout();$stack=[];$cost=0;$length=strlen($text);$nextPulse=0;
+ $capacity=static function(int $n):int{$size=8;while($size<$n)$size*=2;return $size;};
+ $value=static function()use(&$stack):void{$last=count($stack)-1;if($last>=0&&$stack[$last]['type']==='[')$stack[$last]['count']++;};
+ for($i=0;$i<$length;$i++){if($pulse!==null&&$i>=$nextPulse){$pulse();$nextPulse=$i+8192;}$c=$text[$i];if(str_contains(" \r\n\t,",$c))continue;
+  if($c==='['||$c==='{'){$value();if(count($stack)>=511)return null;$stack[]=['type'=>$c,'count'=>0];continue;}
+  if($c===']'||$c==='}'){$frame=array_pop($stack);if($frame===null)return null;$n=$frame['count'];$cap=$capacity($n);$cost+=$frame['type']==='['?($n===0?0:($layout['arrays'][$cap]??$layout['array_base']+$cap*$layout['array_slot'])):($n===0?$layout['empty_object']:($layout['objects'][$cap]??$layout['object_base']+$cap*$layout['map_slot']));continue;}
+  if($c===':'){$last=count($stack)-1;if($last<0||$stack[$last]['type']!=='{')return null;$stack[$last]['count']++;continue;}
+  if($c==='"'){$value();$start=++$i;for(;$i<$length;$i++){if($pulse!==null&&$i>=$nextPulse){$pulse();$nextPulse=$i+8192;}if($text[$i]==='\\'){$i++;continue;}if($text[$i]==='"')break;}if($i>=$length)return null;$bytes=$i-$start;if($bytes>0)$cost+=$layout['string_base']+8*(int)ceil($bytes/8);continue;}
+  $value();for(;$i+1<$length&&!str_contains(" \r\n\t,]}",$text[$i+1]);$i++);
+ }
+ return $stack?null:$cost;
+}

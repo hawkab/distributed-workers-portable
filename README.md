@@ -17,7 +17,7 @@ Use one backend and a private state directory per installation. A device/enrollm
 
 Connections, worker heartbeats and claims carry `X-Worker-Profile`, a base64url JSON header with schema 1, exact advertised capabilities and numeric resource fields. CPU availability applies visible affinity/cgroup quotas; RAM applies visible cgroup/runtime limits, including Node's actual V8 heap headroom and PHP `memory_limit`. Disk space describes the state directory's filesystem. GPU VRAM is reported where Linux DRM exposes it; compute units and unified memory remain `null` when unknown. CUDA core counts are not inferred from GPU models. An unavailable GPU probe reports `unknown`, not `none`. Discovery failures leave nullable values and do not prevent ordinary work. Profiles contain no hostnames, models or serial numbers. Devices use only their own token; administrative enrollment creation and other workers' data are outside this runtime.
 
-Start Node with `node node/bootstrap.mjs /private/worker.local.json`. On shared hosting, schedule `php php/bootstrap.php /private/worker.local.json --once` using the provider's cron. The PHP runtime needs `curl`, `openssl`, `zlib` and `Phar`; `intl` is optional. A provider's actual wall-time allowance may be supplied as `host_window_seconds`. It is a resumable execution window, not a task deadline. PHP's `max_execution_time` has platform-dependent CPU/wall-time semantics; do not assume it describes the hosting provider's cron limit.
+Start Node with `node node/bootstrap.mjs /private/worker.local.json`. On shared hosting, schedule `php php/bootstrap.php /private/worker.local.json --drain` using the provider's cron. Drain runs process ready tasks until the queue is empty; `--once` remains available for one task. An overlapping cron invocation leaves before reading mutable state, while the existing process retains its lock. Keep code, credentials and state outside the website's document root. The PHP runtime needs `curl`, `openssl`, `zlib` and `Phar`; `intl` is optional. A provider's actual wall-time allowance may be supplied as `host_window_seconds`. It is a resumable execution window, not a task deadline. PHP's `max_execution_time` has platform-dependent CPU/wall-time semantics; do not assume it describes the hosting provider's cron limit.
 
 The bootstrap selects the last verified installed version. A Node child exit 75 reloads that version. PHP cron loads it at the next invocation; a PHP daemon supervisor should restart exit 75. A service supervisor must allow healthy long jobs to drain or retain their durable state rather than impose an unrelated startup/job timeout.
 
@@ -36,6 +36,14 @@ A declarative HTTP task and `ctx.http.request` share this object:
 ```
 
 `body_text` is supported; `body_artifact_id` is not advertised in this version. Response header names are lowercase and every value is a string array, retaining duplicate headers. Responses contain status, headers, final URL and a sealed `{artifact_id,length,sha256,media_type,name}` reference. `text`/`json` inline modes require an explicit `max_bytes`. When the encoded completion exceeds the gateway’s actual 16 MiB JSON budget, HTTP inline views fall back to their full source artifact; other computed results stream into a JSON artifact with `result_format: "json"`. Both expose `control_budget_exceeded`. Overflow, invalid UTF-8 or invalid JSON return the **full** artifact and a `body_error`, without truncation. HTTP error responses remain inspectable HTTP results.
+
+PHP additionally checks its actual heap before materializing text or expanding
+JSON. `inline_memory_budget_exceeded` retains the full sealed artifact when the
+representation would not fit; it does not request the source again. Inline
+artifact reads renew leases, observe cancellation and yield at an actual host
+execution window. Restricted telemetry functions may remain unavailable without
+preventing supported compute/network jobs. PHP advertises `runtime.php.v1` so
+jobs can explicitly select that implemented backend when needed.
 
 Source entity bytes are preserved after transfer framing and before content decoding. Default source headers are `Accept: */*`, `Accept-Encoding: identity`, `User-Agent: DistributedWorker/1`. Explicit compressed responses retain their compressed bytes and `Content-Encoding`.
 
