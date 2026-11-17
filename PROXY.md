@@ -56,7 +56,13 @@ worker state to avoid overwriting a concurrently refreshed verifier cache.
 Failed endpoints receive exponential retry backoff; successful transfers clear
 it. There is no attempt count or overall job deadline. Selection is deterministic
 and round-robin, initially seeded by the persisted server-assigned worker ID.
-A required pool outage leaves work pending; it does not invent a successful
+The selected endpoint and next stable endpoint ID are durably saved before
+dispatch, keyed by canonical pool membership and worker identity. Cron/restart
+therefore continues rotation even after all cooldowns expired. A refreshed
+membership remaps the saved endpoint IDs instead of reusing a fragile index.
+If this cursor cannot be persisted, no vendor request is sent. Source read-idle
+failures mark proxy health; cancellation, lease loss and an actual host execution
+window do not blame the proxy. A required pool outage leaves work pending; it does not invent a successful
 result or issue a direct vendor request. Standard effect `never` uncertainty
 rules still apply after a possibly dispatched mutation.
 

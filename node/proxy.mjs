@@ -27,7 +27,23 @@ export class ProxyPool{
   this.entries=[...entries.values()].sort((a,b)=>a.id.localeCompare(b.id));this.seedHealth=cache.health??{};
  }
  capabilities(){this.reload();return this.mode==='required'&&this.entries.length?['proxy.egress.v1']:[];}
- select(){if(this.mode==='off')return null;this.reload();for(let n=0;n<this.entries.length;n++){const index=(this.cursor+n)%this.entries.length,p=this.entries[index],h=this.store?.data.proxy_health?.[p.id]??this.seedHealth[p.id];if((h?.retry_after_ms??0)>Date.now())continue;this.cursor=(index+1)%this.entries.length;return p;}if(this.mode==='prefer')return null;throw new ProxyPending();}
+ rotation(){
+  const worker=this.store?.data.worker_identity?.worker_id??this.seed,ids=this.entries.map(p=>p.id),pool=crypto.createHash('sha256').update(JSON.stringify(ids)).digest('hex');
+  const scope=crypto.createHash('sha256').update(JSON.stringify([worker,this.mode,this.config.cache_file??'',this.config.sources_file??'',this.config.required_country??''])).digest('hex'),key=crypto.createHash('sha256').update(pool+'\n'+worker).digest('hex');
+  const oldKey=this.store?.data.proxy_cursor_scopes?.[scope],record=this.store?.data.proxy_cursors?.[key]??this.store?.data.proxy_cursors?.[oldKey];let start=this.cursor%Math.max(ids.length,1);
+  if(record){const next=ids.indexOf(record.next_endpoint_id),last=ids.indexOf(record.last_endpoint_id);if(next>=0)start=next;else if(last>=0)start=(last+1)%ids.length;else{const successor=ids.findIndex(id=>id>record.last_endpoint_id);start=successor<0?0:successor;}}
+  return {scope,key,pool,oldKey,start};
+ }
+ persistSelection(rotation,index){
+  if(!this.store){const e=new ProxyPending();e.message='proxy_cursor_persist_failed';throw e;}
+  const cursors=this.store.data.proxy_cursors,scopes=this.store.data.proxy_cursor_scopes,next={...(cursors??{})},links={...(scopes??{})};
+  next[rotation.key]={schema:1,pool_id:rotation.pool,last_endpoint_id:this.entries[index].id,next_endpoint_id:this.entries[(index+1)%this.entries.length].id};links[rotation.scope]=rotation.key;
+  if(rotation.oldKey&&rotation.oldKey!==rotation.key&&!Object.values(links).includes(rotation.oldKey))delete next[rotation.oldKey];
+  this.store.data.proxy_cursors=next;this.store.data.proxy_cursor_scopes=links;
+  try{this.store.save();}catch{if(cursors===undefined)delete this.store.data.proxy_cursors;else this.store.data.proxy_cursors=cursors;if(scopes===undefined)delete this.store.data.proxy_cursor_scopes;else this.store.data.proxy_cursor_scopes=scopes;const e=new ProxyPending();e.message='proxy_cursor_persist_failed';throw e;}
+ }
+ select(){if(this.mode==='off')return null;this.reload();const rotation=this.rotation();for(let n=0;n<this.entries.length;n++){const index=(rotation.start+n)%this.entries.length,p=this.entries[index],h=this.store?.data.proxy_health?.[p.id]??this.seedHealth[p.id];if((h?.retry_after_ms??0)>Date.now())continue;this.persistSelection(rotation,index);this.cursor=(index+1)%this.entries.length;return p;}if(this.mode==='prefer')return null;throw new ProxyPending();}
+
  success(p){if(!p)return;this.health(p,{failures:0,retry_after_ms:0,last_ok:Date.now()});}
  failed(p){if(!p)return;const old=this.store?.data.proxy_health?.[p.id]??this.seedHealth[p.id]??{},failures=(old.failures??0)+1;this.health(p,{...old,failures,retry_after_ms:Date.now()+Math.min(300000,1000*2**Math.min(failures-1,9))});}
  health(p,h){if(this.store){this.store.data.proxy_health??={};this.store.data.proxy_health[p.id]=h;try{this.store.save();}catch{/* Health is advisory, never a failed captured result. */}}}
