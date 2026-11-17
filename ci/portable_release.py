@@ -25,7 +25,7 @@ MANIFEST = 'portable-manifest.json'
 FIELDS = ('component', 'version_code', 'version_name', 'url', 'sha256')
 COMPONENT = 'worker-portable'
 CANONICAL_BASE = 'https://github.com/hawkab/distributed-workers-portable/releases/download/'
-ROOT_FILES = {'VERSION.json', 'update-sources.example.json', 'package.json', 'README.md', 'LICENSE', 'LICENSE.txt'}
+ROOT_FILES = {'VERSION.json', 'update-sources.example.json', 'package.json', 'README.md', 'PROXY.md', 'LICENSE', 'LICENSE.txt'}
 
 def runtime_name(name):
     return (name in ROOT_FILES or name == 'assets/release-public.der' or

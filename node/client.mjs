@@ -2,14 +2,15 @@ import http from 'node:http';
 import https from 'node:https';
 import {armTimeout} from './timers.mjs';
 import {encodeProfile} from './hardware.mjs';
+const directHTTP=new http.Agent({keepAlive:true,proxyEnv:{}}),directHTTPS=new https.Agent({keepAlive:true,proxyEnv:{}});
 export class HTTPFailure extends Error {constructor(status,body){super('http_'+status);this.status=status;this.body=body;}}
-export function open(method,url,{headers={},body,signal,idleTimeoutMs=0,connectTimeoutMs=0,responseHeaderIdleMs=0}={}) {
+export function open(method,url,{headers={},body,signal,idleTimeoutMs=0,connectTimeoutMs=0,responseHeaderIdleMs=0,agent,requestOptions={}}={}) {
  return new Promise((resolve,reject)=>{
   const u=new URL(url);if(!['http:','https:'].includes(u.protocol)||u.username||u.password){reject(Error('invalid_http_url'));return;}
   let stopConnect=()=>{},stopHeader=()=>{},headersReceived=false,headerSocket;
   const timeout=message=>{const e=Error(message);e.code='ETIMEDOUT';request.destroy(e);};
   const refreshHeader=()=>{stopHeader();if(!headersReceived)stopHeader=armTimeout(()=>timeout('read_idle_timeout'),responseHeaderIdleMs);};
-  const request=(u.protocol==='https:'?https:http).request(u,{method,headers,signal},response=>{headersReceived=true;stopHeader();headerSocket?.removeListener('data',refreshHeader);resolve(response);});
+  const request=(u.protocol==='https:'?https:http).request(u,{method,headers,signal,agent:agent??(u.protocol==='https:'?directHTTPS:directHTTP),...requestOptions},response=>{headersReceived=true;stopHeader();headerSocket?.removeListener('data',refreshHeader);resolve(response);});
   if(connectTimeoutMs>0){stopConnect=armTimeout(()=>timeout('connect_timeout'),connectTimeoutMs);request.on('socket',socket=>{if(!socket.connecting)stopConnect();else socket.once(u.protocol==='https:'?'secureConnect':'connect',()=>stopConnect());});}
   request.setTimeout(idleTimeoutMs,()=>timeout('http_idle_timeout'));
   request.once('finish',()=>{if(responseHeaderIdleMs>0&&!headersReceived){headerSocket=request.socket;headerSocket?.on('data',refreshHeader);refreshHeader();}});

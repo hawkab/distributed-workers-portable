@@ -64,7 +64,7 @@ PHP_BINARY=/usr/bin/php node --test tests/*.test.mjs
 
 The first command uses an already installed official `php:8.3-apache` Docker image when `PHP_BINARY` is absent. CI uses native PHP 8.2 with no Docker socket. Tests exercise 64 MiB binary transfers, bounded memory, lost ACKs, resumed ranges, cancellation, real PHP execution windows, durable outboxes, redirect credential handling, compressed entity bytes and signed updates. They do not contact deployment services or public release APIs.
 
-## Opt-in native programs (Node only)
+## Opt-in native programs (Node and available PHP hosts)
 
 The `command.run` backend executes operator-provisioned programs without adding
 application modules to the worker. It is disabled when `commands` is absent.
@@ -120,8 +120,14 @@ A native process is trusted operator code with its OS account's access. It is
 not a sandbox, and its HTTP calls do not use the worker effect journal or HTTP
 host policy. Nonempty `job.network` is rejected. A worker with a nonempty local
 network allow-policy does not advertise native commands. Supply real restrictions
-through OS/container isolation or the program's own validated inputs. Process
+through OS/container isolation or the program's own validated inputs. Node process
 trees are killed as a Unix process group or with Windows taskkill; programs must
 not deliberately detach from that supervision. Hard worker/host crashes require
-OS service/container lifecycle supervision. PHP and Android keep their existing
-capabilities and do not claim native command work.
+OS service/container lifecycle supervision. PHP advertises native work only when its process/pipe functions and configured
+executable are actually usable. Linux PHP additionally cleans up descendants
+using birth-identity-checked `/proc` records when `posix_kill` is available;
+restricted hosts rely on the configured program's cooperative termination.
+Android does not advertise native commands.
+
+Task-only proxy configuration, verified source caches, failover and the native
+process environment contract are described in [PROXY.md](PROXY.md).

@@ -32,3 +32,12 @@ bootstrap.json
 secrets/
 id_rsa
 id_ed25519
+
+proxy-sources.txt
+proxy-cache.json
+proxy-config.json
+*.proxy.local.*
+
+proxy-sources.json
+proxy-sources.local.txt
+proxy.local.json

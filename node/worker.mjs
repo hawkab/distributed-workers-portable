@@ -17,7 +17,7 @@ export class Worker {
   this.baseCapabilities=[...this.capabilities];
  }
  async tick() {
-  this.capabilities=[...new Set([...this.baseCapabilities,...this.commands.capabilities()])];
+  await this.transfer.proxyPool.refresh();this.capabilities=[...new Set([...this.baseCapabilities,...this.commands.capabilities(),...this.transfer.proxyPool.capabilities()])];
   const profile=()=>this.client.setProfile(collectProfile(this.capabilities,this.store.directory));
   profile();if(!this.client.connected)await this.client.connect(this.store);
   await this.client.flush(this.store);
@@ -62,11 +62,11 @@ export class Worker {
      default:throw Error('unsupported_operation');
     }
    } catch(e) {
-    if(!controller.signal.aborted&&(['ECONNRESET','ECONNREFUSED','EAI_AGAIN','ENOTFOUND','EPIPE','ETIMEDOUT'].includes(e.code)||e.status>=500||e.status===429))throw e;
+    if(!controller.signal.aborted&&(['PROXY_PENDING','ECONNRESET','ECONNREFUSED','EAI_AGAIN','ENOTFOUND','EPIPE','ETIMEDOUT'].includes(e.code)||e.status>=500||e.status===429))throw e;
     status='failed';error={code:controller.signal.aborted?(controller.signal.reason?.message??'cancelled'):(e.message??'execution_failed'),message:'Task execution did not complete'};
     result=e.responseResult??(e.artifact?{artifact:e.artifact}:null);if(e.artifact)remember(e.artifact);
    }
-   const body={...this.client.identity(job),status,result,artifact_ids:[...artifacts.keys()],...(error?{error}:{})};
+   const body={...this.client.identity(job),status,result,artifact_ids:[...new Set([...artifacts.keys(),...Object.keys(this.store.data.job_artifacts[job.id]??{})])],...(error?{error}:{})};
    const completion=await prepareCompletion(this.client,this.store,job,body,{controlBytes:this.config.control_bytes??16777216,chunkBytes:this.config.chunk_bytes??262144,signal:status==='failed'?undefined:controller.signal,progress:p=>{progress=p;}});
    this.store.putCompletion(job,completion);delete this.store.data.active;this.store.save();return completion;
   } finally {clearInterval(timer);controller.abort();}

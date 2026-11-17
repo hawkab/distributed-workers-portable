@@ -6,10 +6,12 @@ import {spawn} from 'node:child_process';
 import {once} from 'node:events';
 import {finished} from 'node:stream/promises';
 import {encodedJSON} from './completion.mjs';
+import {ProxyPool} from './proxy.mjs';
 
 function failure(code,result){const error=Error(code);if(result){error.responseResult=result;error.artifact=result.artifact;}return error;}
 function transient(error){return error.status===408||error.status===425||error.status===429||error.status>=500||['ECONNRESET','ECONNREFUSED','EAI_AGAIN','ENOTFOUND','EPIPE','ETIMEDOUT'].includes(error.code);}
-async function retry(operation){let delay=1000;for(;;){try{return await operation();}catch(error){if(!transient(error))throw error;await new Promise(resolve=>setTimeout(resolve,delay));delay=Math.min(30000,delay*2);}}}
+async function retry(operation,signal){let delay=1000;for(;;){try{return await operation();}catch(error){if(!transient(error)||signal?.aborted)throw error;await new Promise((resolve,reject)=>{const abort=()=>{clearTimeout(timer);reject(signal.reason??Error('cancelled'));},timer=setTimeout(()=>{signal?.removeEventListener('abort',abort);resolve();},delay);signal?.addEventListener('abort',abort,{once:true});if(signal?.aborted)abort();});delay=Math.min(30000,delay*2);}}}
+
 function fingerprint(stat){return [stat.dev,stat.ino,stat.size,stat.mtimeNs,stat.ctimeNs,stat.mode].map(String).join(':');}
 export function inspectExecutable(file){const hash=crypto.createHash('sha256'),fd=fs.openSync(file,'r'),buffer=Buffer.allocUnsafe(65536);try{const before=fs.fstatSync(fd,{bigint:true});if(!before.isFile())throw Error('command_executable_not_file');for(let n;(n=fs.readSync(fd,buffer,0,buffer.length,null))>0;)hash.update(buffer.subarray(0,n));const after=fs.fstatSync(fd,{bigint:true});if(fingerprint(before)!==fingerprint(after))throw Error('command_executable_changed_during_check');return {sha256:hash.digest('hex'),fingerprint:fingerprint(after)};}finally{fs.closeSync(fd);}}
 function emptyNetwork(policy){return policy===undefined||policy===null||Object.keys(policy).length===0;}
@@ -17,39 +19,43 @@ function validate(config){
  if(!config||typeof config!=='object'||!path.isAbsolute(config.executable??'')||!Array.isArray(config.argv??[])||(config.argv??[]).some(value=>typeof value!=='string'||value.includes('\0'))||!(/^[a-f0-9]{64}$/).test(config.sha256??'')||typeof config.capability!=='string'||!config.capability||/\s/.test(config.capability)||['command.run','command.run.v1','artifact.stream'].includes(config.capability))throw Error('invalid_command_configuration');
  if(!['safe','never'].includes(config.replay??'never')||!Number.isSafeInteger(config.stderr_bytes??16384)||(config.stderr_bytes??16384)<0)throw Error('invalid_command_configuration');
  if(config.env!==undefined&&(!config.env||typeof config.env!=='object'||Array.isArray(config.env)||Object.entries(config.env).some(([key,value])=>!(/^[A-Za-z_][A-Za-z0-9_]*$/).test(key)||typeof value!=='string'||value.includes('\0'))))throw Error('invalid_command_environment');
+ if(config.proxy_env!==undefined&&typeof config.proxy_env!=='boolean'||config.proxy_failure_exit_codes!==undefined&&(!Array.isArray(config.proxy_failure_exit_codes)||config.proxy_failure_exit_codes.some(x=>!Number.isInteger(x)||x<1||x>255)))throw Error('invalid_command_configuration');
  return config;
 }
 export class Commands {
- constructor(config,client,store,{inspect=inspectExecutable}={}){this.inspect=inspect;this.verified=new Map();this.programs=config.commands??{};this.client=client;this.store=store;this.chunkBytes=config.chunk_bytes??262144;this.network=config.network;if(!Number.isSafeInteger(this.chunkBytes)||this.chunkBytes<=0)throw Error('invalid_chunk_bytes');if(!this.programs||typeof this.programs!=='object'||Array.isArray(this.programs))throw Error('invalid_command_configuration');this.usable=new Map();}
+ constructor(config,client,store,{inspect=inspectExecutable}={}){this.proxyPool=new ProxyPool(config,store);this.inspect=inspect;this.verified=new Map();this.programs=config.commands??{};this.client=client;this.store=store;this.chunkBytes=config.chunk_bytes??262144;this.network=config.network;if(!Number.isSafeInteger(this.chunkBytes)||this.chunkBytes<=0)throw Error('invalid_chunk_bytes');if(!this.programs||typeof this.programs!=='object'||Array.isArray(this.programs))throw Error('invalid_command_configuration');this.usable=new Map();}
  capabilities(){
   this.usable.clear();
   if(!emptyNetwork(this.network))return [];
   for(const [id,entry] of Object.entries(this.programs)){
-   try{const program=validate(entry),stat=fs.statSync(program.executable,{bigint:true});if(!id||!stat.isFile())continue;fs.accessSync(program.executable,fs.constants.X_OK);const cacheKey=program.executable+'\0'+program.sha256,cached=this.verified.get(cacheKey);if(cached?.fingerprint!==fingerprint(stat)){const inspected=this.inspect(program.executable);if(inspected.sha256!==program.sha256)continue;this.verified.set(cacheKey,inspected);}this.usable.set(id,program);}catch{/* Unusable private entries do not advertise execution. */}
+   try{const program=validate(entry),stat=fs.statSync(program.executable,{bigint:true});if(!id||!stat.isFile()||this.proxyPool.mode==='required'&&program.proxy_env!==true)continue;fs.accessSync(program.executable,fs.constants.X_OK);const cacheKey=program.executable+'\0'+program.sha256,cached=this.verified.get(cacheKey);if(cached?.fingerprint!==fingerprint(stat)){const inspected=this.inspect(program.executable);if(inspected.sha256!==program.sha256)continue;this.verified.set(cacheKey,inspected);}this.usable.set(id,program);}catch{/* Unusable private entries do not advertise execution. */}
   }
   return this.usable.size?['command.run.v1',...new Set([...this.usable.values()].map(program=>program.capability))]:[];
  }
- async execute(job,{signal,progress=()=>{}}={}){
+ async execute(job,options={}){for(;;){try{return await this.run(job,options);}catch(e){if(e.code!=='PROXY_RETRY')throw e;}}}
+ async run(job,{signal,progress=()=>{}}={}){
   const input=job.input;if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(key=>!['program','payload'].includes(key))||typeof input.program!=='string'||!input.payload||typeof input.payload!=='object'||Array.isArray(input.payload))throw Error('invalid_command_input');
   if(!emptyNetwork(job.network)||!emptyNetwork(this.network))throw Error('command_network_policy_not_enforceable');
-  const program=validate(this.programs[input.program]);
+  const program=validate(this.programs[input.program]);if(this.proxyPool.mode==='required'&&program.proxy_env!==true)throw Error('command_proxy_environment_not_enabled');
   if(signal?.aborted)throw signal.reason??Error('cancelled');
   this.store.data.command_runs??={};const key=job.attempt_id,identity=this.client.identity(job);
   const fingerprint=crypto.createHash('sha256').update(JSON.stringify({program:input.program,sha256:program.sha256,argv:program.argv??[],env:program.env??{},payload:input.payload})).digest('hex');
   let state=this.store.data.command_runs[key];
-  if(state&&state.fingerprint!==fingerprint)throw Error('command_pending_input_changed');
+  if(state?.fingerprint&&state.fingerprint!==fingerprint)throw Error('command_pending_input_changed');
+  if(state?.result&&state.proxy_id&&program.replay==='safe'&&(program.proxy_failure_exit_codes??[]).includes(state.result.exit_code)){state={previous_upload_id:state.upload_id,generation:(state.generation??0)+1};}
   if(state?.result){if(state.result.exit_code!==0||state.result.signal||state.result.error_code)throw failure(state.result.error_code??'command_failed',state.result);return state.result;}
-  if(state?.stdout_complete&&state.exit_recorded)return this.finish(job,state,program);
+  if(state?.stdout_complete&&state.exit_recorded){if(state.proxy_id&&!state.proxy_failure_recorded&&(program.proxy_failure_exit_codes??[]).includes(state.exit_code)){this.proxyPool.failed({id:state.proxy_id});state.proxy_failure_recorded=true;this.store.save();}return this.finish(job,state,program,signal);}
   fs.accessSync(program.executable,fs.constants.X_OK);if(this.inspect(program.executable).sha256!==program.sha256)throw Error('command_executable_hash_mismatch');
   if(state?.phase==='started'){
    if((program.replay??'never')!=='safe')throw Error('command_outcome_uncertain');
    state={previous_upload_id:state.upload_id,generation:(state.generation??0)+1};
   }
-  state={...state,job_id:job.id,attempt_id:job.attempt_id,fingerprint,program:input.program,phase:'prepared',execution_id:crypto.randomUUID(),generation:state?.generation??0};this.store.data.command_runs[key]=state;this.store.save();
-  if(!state.upload_id){const created=await retry(()=>this.client.request('POST','/v1/jobs/'+encodeURIComponent(job.id)+'/artifacts',{json:{...identity,key:'command/'+key+'/'+state.execution_id,name:program.name??'stdout.bin',media_type:program.media_type??'application/octet-stream'}}));state.upload_id=created.upload_id;this.store.save();}
+  const selected=program.proxy_env===true?this.proxyPool.select():null;
+  state={...state,...(selected?{proxy_id:selected.id}:{}),job_id:job.id,attempt_id:job.attempt_id,fingerprint,program:input.program,phase:'prepared',execution_id:crypto.randomUUID(),generation:state?.generation??0};this.store.data.command_runs[key]=state;this.store.save();
+  if(!state.upload_id){const created=await retry(()=>this.client.request('POST','/v1/jobs/'+encodeURIComponent(job.id)+'/artifacts',{json:{...identity,key:'command/'+key+'/'+state.execution_id,name:program.name??'stdout.bin',media_type:program.media_type??'application/octet-stream'}}),signal);state.upload_id=created.upload_id;this.store.save();}
   if(signal?.aborted)throw signal.reason??Error('cancelled');
   state.phase='started';this.store.save();
-  const env={...(process.platform==='win32'&&process.env.SystemRoot?{SystemRoot:process.env.SystemRoot}:{}),...(program.env??{})};
+  const env={...(process.platform==='win32'&&process.env.SystemRoot?{SystemRoot:process.env.SystemRoot}:{}),...(program.env??{}),...this.proxyPool.environment(selected)};
   const child=spawn(program.executable,program.argv??[],{shell:false,env,cwd:os.tmpdir(),stdio:['pipe','pipe','pipe'],windowsHide:true,detached:process.platform!=='win32'});
   let killed=false,spawnError=null,stdinFailure=null,tail=Buffer.alloc(0),stderrBytes=0;const stderrBudget=program.stderr_bytes??16384;
   const kill=()=>{
@@ -65,24 +71,26 @@ export class Commands {
   const stdin=(async()=>{try{for(const bytes of encodedJSON(input.payload)){if(!child.stdin.write(bytes))await once(child.stdin,'drain');}child.stdin.end();await finished(child.stdin);}catch(error){stdinFailure=error;if(!['EPIPE','ERR_STREAM_DESTROYED','ERR_STREAM_WRITE_AFTER_END','ABORT_ERR'].includes(error.code))throw error;}})();
   let outcome;
   try{
-   const output=this.capture(job,state,child.stdout,progress).catch(error=>{kill();throw error;});
+   const output=this.capture(job,state,child.stdout,progress,signal).catch(error=>{kill();throw error;});
    const results=await Promise.allSettled([output,closed,stderr,stdin]);outcome=results[1].value;
+   if(selected){let text=tail.toString();for(const secret of [this.proxyPool.environment(selected).FLEET_TASK_PROXY_URL,selected.password,selected.username].filter(Boolean))text=text.split(secret).join('[redacted]');tail=Buffer.from(text).subarray(-stderrBudget);}
    state.exit_recorded=true;state.exit_code=outcome.code;state.signal=outcome.terminated;state.stderr={tail_base64:tail.toString('base64'),bytes:stderrBytes,retained_bytes:tail.length,truncated:stderrBytes>tail.length};
    if(stdinFailure)state.error_code='command_stdin_failed';if(spawnError)state.error_code='command_spawn_failed';if(signal?.aborted)state.error_code=signal.reason?.message??'cancelled';this.store.save();
    for(const result of results)if(result.status==='rejected')throw result.reason;
-   return await this.finish(job,state,program);
+   if(selected&&(program.proxy_failure_exit_codes??[]).includes(state.exit_code)){this.proxyPool.failed(selected);state.proxy_failure_recorded=true;this.store.save();}else if(selected&&state.exit_code===0)this.proxyPool.success(selected);
+   return await this.finish(job,state,program,signal);
   }finally{signal?.removeEventListener('abort',abort);process.removeListener('exit',onExit);if(!outcome)kill();}
  }
- async capture(job,state,stream,progress){
+ async capture(job,state,stream,progress,signal){
   const digest=crypto.createHash('sha256');let offset=0,used=0;const buffer=Buffer.allocUnsafe(this.chunkBytes);
-  const send=async()=>{if(!used)return;const bytes=buffer.subarray(0,used),start=offset;const ack=await retry(()=>this.client.request('PUT','/v1/artifacts/'+encodeURIComponent(state.upload_id)+'/chunks/'+start,{body:bytes,headers:{'Content-Type':'application/octet-stream'},job}));if(ack.offset!==start||ack.next_offset!==start+used)throw Error('command_chunk_ack_mismatch');digest.update(bytes);offset+=used;state.offset=offset;this.store.save();progress({phase:'command_stdout',bytes:offset});used=0;};
+  const send=async()=>{if(!used)return;const bytes=buffer.subarray(0,used),start=offset;const ack=await retry(()=>this.client.request('PUT','/v1/artifacts/'+encodeURIComponent(state.upload_id)+'/chunks/'+start,{body:bytes,headers:{'Content-Type':'application/octet-stream'},job}),signal);if(ack.offset!==start||ack.next_offset!==start+used)throw Error('command_chunk_ack_mismatch');digest.update(bytes);offset+=used;state.offset=offset;this.store.save();progress({phase:'command_stdout',bytes:offset});used=0;};
   for await(const bytes of stream){let start=0;while(start<bytes.length){const count=Math.min(this.chunkBytes-used,bytes.length-start);bytes.copy(buffer,used,start,start+count);used+=count;start+=count;if(used===this.chunkBytes)await send();}}
   await send();state.stdout_complete=true;state.length=offset;state.sha256=digest.digest('hex');this.store.save();
  }
- async finish(job,state,program){
-  const artifact=await retry(()=>this.client.request('POST','/v1/artifacts/'+encodeURIComponent(state.upload_id)+'/finish',{json:{...this.client.identity(job),length:state.length,sha256:state.sha256}}));
+ async finish(job,state,program,signal){
+  const artifact=await retry(()=>this.client.request('POST','/v1/artifacts/'+encodeURIComponent(state.upload_id)+'/finish',{json:{...this.client.identity(job),length:state.length,sha256:state.sha256}}),signal);
   if(artifact.length!==state.length||artifact.sha256!==state.sha256||typeof artifact.artifact_id!=='string')throw Error('command_artifact_integrity_mismatch');
   const result={artifact,exit_code:state.exit_code,stderr:state.stderr??{tail_base64:'',bytes:0,retained_bytes:0,truncated:false},...(state.signal?{signal:state.signal}:{}),...(state.error_code?{error_code:state.error_code}:{})};state.result=result;state.phase='finished';this.store.rememberArtifact(job,artifact);this.store.save();
-  if(result.exit_code!==0||result.signal||result.error_code)throw failure(result.error_code??'command_exit_nonzero',result);return result;
+  if(state.proxy_id&&program.replay==='safe'&&(program.proxy_failure_exit_codes??[]).includes(result.exit_code)){const e=failure('proxy_unavailable',result);e.code='PROXY_RETRY';throw e;}if(result.exit_code!==0||result.signal||result.error_code)throw failure(result.error_code??'command_exit_nonzero',result);return result;
  }
 }

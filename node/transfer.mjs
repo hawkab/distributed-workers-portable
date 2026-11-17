@@ -1,10 +1,11 @@
 import crypto from 'node:crypto';
+import {ProxyPool} from './proxy.mjs';
 import {open} from './client.mjs';
 import {sourceRequest,sourceChunks} from './source.mjs';
 export {normalizeRequest as validateRequest} from './request.mjs';
 import {normalizeRequest} from './request.mjs';
 export class Transfer {
- constructor(client,store,config={}){this.client=client;this.store=store;this.network=config.network;this.chunkBytes=config.chunk_bytes??256*1024;if(!Number.isSafeInteger(this.chunkBytes)||this.chunkBytes<=0)throw new Error('invalid_chunk_bytes');this.peakBufferedBytes=0;}
+ constructor(client,store,config={}){this.client=client;this.store=store;this.network=config.network;this.proxyPool=new ProxyPool(config,store);this.chunkBytes=config.chunk_bytes??256*1024;if(!Number.isSafeInteger(this.chunkBytes)||this.chunkBytes<=0)throw new Error('invalid_chunk_bytes');this.peakBufferedBytes=0;}
  async execute(job,raw,{signal,progress=()=>{},executionId=crypto.randomUUID()}={}) {
   const input=normalizeRequest(raw),key=job.attempt_id+':'+input.effect_id,identity=this.client.identity(job);
   let state=this.store.data.transfers[key];
@@ -14,9 +15,12 @@ export class Transfer {
   }
   // Finish a durably captured actual response without contacting its vendor again.
   if(state?.result){await this.finishEffect(job,input,state,state.result,signal);return this.view(job,input,state.result,signal);}
+  let proxy,completedOnly=false;try{proxy=this.proxyPool.select();}catch(error){if(error.code!=='PROXY_PENDING')throw error;let prior;try{prior=await this.client.request('GET',this.effectPath(job,input)+'/status',{job,signal});}catch(e){if(e.status!==404)throw e;}if(prior?.state!=='completed'&&!(input.replay==='never'&&['started','uncertain'].includes(prior?.state)))throw error;completedOnly=true;}
+
   const effect=await this.client.request('POST',this.effectPath(job,input)+'/begin',{json:{...identity,execution_id:executionId,request:input},signal});
   if(effect.state==='completed')return this.view(job,input,effect.response,signal);
   if(effect.state==='uncertain')throw new Error('external_effect_uncertain_not_replayed');
+  if(completedOnly){const e=new Error('proxy_unavailable');e.code='PROXY_PENDING';throw e;}
   if(effect.state!=='execute'||!effect.request_sha256)throw new Error('invalid_effect_receipt');
   state??={generation:0};Object.assign(state,{execution_id:executionId,request_sha256:effect.request_sha256});this.store.data.transfers[key]=state;this.store.save();
   if(!state.upload_id){const created=await this.client.request('POST','/v1/jobs/'+job.id+'/artifacts',{json:{...identity,key:input.effect_id+'/'+executionId+'/'+state.generation,...(input.response.name?{name:input.response.name}:{}),media_type:input.response.media_type??'application/octet-stream'},signal});state.upload_id=created.upload_id;this.store.save();}
@@ -25,7 +29,7 @@ export class Transfer {
   const headers={...input.headers};if(!Object.keys(headers).some(x=>x.toLowerCase()==='accept-encoding'))headers['Accept-Encoding']='identity';
   if(input.replay==='idempotent'&&input.idempotency_key)headers[input.idempotency_header??'Idempotency-Key']=input.idempotency_key;
   if(offset>0){headers.Range='bytes='+offset+'-';headers['If-Range']=state.validator;}
-  const source=await sourceRequest(input,{headers,signal,policies:[this.network,job.network]});
+  const source=await sourceRequest(input,{headers,signal,policies:[this.network,job.network],proxyPool:this.proxyPool,proxy});
   if(offset>0){const range=/^bytes (\d+)-(\d+)\/(\d+|\*)$/.exec(String(source.headers['content-range']??''));if(source.statusCode!==206||!range||Number(range[1])!==offset||source.headers.etag!==state.validator){source.destroy();await this.restartUpload(job,state,signal);return this.execute(job,raw,{signal,progress,executionId});}}
   else{const etag=source.headers.etag;state.validator=typeof etag==='string'&&!etag.startsWith('W/')?etag:null;this.store.save();}
   const responseHeaders={};for(let i=0;i<source.rawHeaders.length;i+=2){const name=source.rawHeaders[i].toLowerCase();(responseHeaders[name]??=[]).push(source.rawHeaders[i+1]);}const responseMeta=state.response_meta??{status:source.statusCode,headers:responseHeaders,url:source.fleetUrl??input.url};state.response_meta=responseMeta;this.store.save();let buffer=Buffer.allocUnsafe(this.chunkBytes),used=0;
