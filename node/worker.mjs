@@ -16,7 +16,7 @@ export class Worker {
   if(config.trusted_javascript===true)this.capabilities.push('javascript','javascript.portable.v1');
   this.baseCapabilities=[...this.capabilities];
  }
- stopAdmission(){this.accepting=false;}
+ stopAdmission(){this.accepting=false;this.claimController?.abort();}
  async tick() {
   if(!this.accepting)return false;
   await this.transfer.proxyPool.refresh();this.capabilities=[...new Set([...this.baseCapabilities,...this.commands.capabilities(),...this.transfer.proxyPool.capabilities()])];
@@ -25,7 +25,7 @@ export class Worker {
   await this.client.flush(this.store);
   profile();await this.client.request('POST','/v1/workers/heartbeat',{json:{worker_id:this.client.workerId,version_code:this.version.code,version_name:this.version.name,capabilities:this.capabilities,abis:[process.arch],state:'idle'}});
   if(!this.accepting)return false;
-  profile();const claimed=await this.client.request('POST','/v1/jobs/claim',{json:{worker_id:this.client.workerId,capabilities:this.capabilities}});
+  profile();this.claimController=new AbortController();const claimed=await this.client.request('POST','/v1/jobs/claim',{json:{worker_id:this.client.workerId,capabilities:this.capabilities},headers:this.config.claim_wait_seconds?{Prefer:'wait='+this.config.claim_wait_seconds}:{},signal:this.claimController.signal});this.claimController=undefined;
   if(!claimed){if(this.store.data.active){delete this.store.data.active;this.store.save();}return false;}
   await this.execute(claimed.job);await this.client.flush(this.store);return true;
  }

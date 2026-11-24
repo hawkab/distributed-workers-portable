@@ -39,12 +39,14 @@ try {
     }
     require $directory . '/php/worker.php';
     require $directory . '/php/updater.php';
+    if (!in_array('--once', $argv, true) && !in_array('--drain', $argv, true)) { $config['claim_wait_seconds'] ??= 20; }
     $worker = new FleetWorker($config);
     $updater = new FleetUpdater($config, $worker->store, $directory);
     $once = in_array('--once', $argv, true);
     $drain = in_array('--drain', $argv, true);
     do {
         try {
+            $pending = false;
             $busy = $worker->tick();
             if (time() >= ($worker->store->data['update_check_at'] ?? 0) + ($config['update_poll_seconds'] ?? 900)) {
                 $worker->store->data['update_check_at'] = time();
@@ -58,9 +60,9 @@ try {
             // Finite cron runs leave transport uncertainty for durable recovery
             // on their next invocation, rather than spinning or claiming success.
             if ($once || $drain) { exit(1); }
-            $busy = false;
+            $busy = false; $pending = true;
         }
-        if (!$busy && !$once && !$drain) { sleep($config['poll_seconds'] ?? 5); }
+        if (!$busy && !$once && !$drain && ($pending || !$worker->client->waitApplied)) { sleep($config['poll_seconds'] ?? 5); }
     } while (!$once && (!$drain || $busy));
 } catch (Throwable $e) {
     $message = $e->getMessage();

@@ -138,3 +138,5 @@ Android does not advertise native commands.
 
 Task-only proxy configuration, verified source caches, failover and the native
 process environment contract are described in [PROXY.md](PROXY.md).
+
+Idle workers use commit-driven long polling when the gateway supports it; older gateways retain polling fallback. Control connections are reused. PHP write controls open fresh connections to avoid libcurl silently replaying an uncertain write. Idle wait windows never limit task execution or result streams.
