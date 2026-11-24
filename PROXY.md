@@ -93,3 +93,5 @@ Bounded stderr redacts configured proxy credentials; it is not logged in full.
 Native programs may support a subset of the generic HTTP proxy transports.
 Provision only compatible schemes in their private pool; an unsupported native
 transport is not a signal to bypass the proxy.
+
+Set `proxy.selection` to `sticky` to keep a healthy route across jobs and restarts. Worker-specific rendezvous hashing spreads participants across the pool; an actual failed route falls back to another eligible endpoint. The default `rotate` retains cyclic selection.
