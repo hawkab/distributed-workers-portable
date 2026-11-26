@@ -5,7 +5,7 @@ Node.js 24+ runs on Linux, Windows and supported CPU architectures. PHP 8.2+ is 
 <!-- fleet-architecture:start -->
 ## Architecture and repository boundary
 
-![Shared UML component architecture; worker-portable is highlighted](docs/architecture.svg)
+![Shared UML component architecture; worker-portable is highlighted](docs/architecture.png)
 
 All six repositories show the same system. **Blue and “THIS REPOSITORY” identify the component owned here**; grey boxes show sibling repositories or external infrastructure. Solid arrows carry runtime traffic, dashed arrows show contracts or reuse, and dotted arrows show deployment or updates. The protocol applies to the gateway and both execution SDKs; deployment arrows show the principal composition entry points.
 
@@ -13,7 +13,7 @@ This repository owns the Node.js and PHP execution adapters: platform operations
 
 Implementation: [Node adapter](node/worker.mjs), [PHP adapter](php/worker.php), [Node admission](node/concurrency.mjs), [PHP admission](php/concurrency.php).
 
-[Open the SVG](docs/architecture.svg) · [Editable DOT source](docs/architecture.dot). The common model and Python-only SVG renderer live in [platform](https://gitflic.ru/project/distributed-workers/platform). From its checkout, `python3 -B tools/render-architecture.py --workspace ../..` regenerates every ownership view in a workspace containing `repos/<component>`. No diagram service or production configuration is needed.
+[SVG source](docs/architecture.svg) · [Editable DOT source](docs/architecture.dot). The common model and Python-only SVG renderer live in [platform](https://gitflic.ru/project/distributed-workers/platform). From its checkout, `python3 -B tools/render-architecture.py --workspace ../.. --png` regenerates every ownership view in a workspace containing `repos/<component>`. PNG previews work on forges that serve SVG as text. SVG generation uses Python alone; PNG rendering uses a local Chromium browser. No diagram service or production configuration is needed.
 <!-- fleet-architecture:end -->
 
 Use one backend and a private state directory per installation. A device/enrollment token is enough for a new installation: the first connection assigns a stable server ID and durably saves it before any heartbeat, claim or completion. Existing device tokens retain their IDs; an existing `worker_id` remains supported. Retrying a connection with the same token recovers the same identity after a lost response. Changing identity while local work is pending is refused and preserves its state. Keep the device token and all deployment addresses in an owner-readable configuration outside this repository.
