@@ -163,3 +163,9 @@ PHP finite `--once` and legacy `--drain` remain compatible. Setting
 host disabling child-process creation retains the serial adapter. The parent
 retains the legacy root-state lock, including while slot zero adopts that lock,
 so overlapping cron invocations cannot overwrite active state.
+
+Private state controls are available on every managed adapter: `admission-drain`
+pauses new work; `runtime-stop` drains productive executions and exits. Removing
+the files permits the supervisor to restart normally. Windows administrators
+can use these controls before stopping a scheduled task, without relying on
+POSIX signals or terminating active native children.

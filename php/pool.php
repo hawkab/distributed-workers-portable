@@ -10,16 +10,16 @@ function fleet_pool(array $config,string $directory,bool $drain=false,$rootLock=
  $save=static function(string $file,array $data):void{$temp=$file.'.'.bin2hex(random_bytes(8));file_put_contents($temp,json_encode($data,JSON_THROW_ON_ERROR));chmod($temp,0600);rename($temp,$file);};
  $scheduler=$root.'/scheduler.json';$lastBusy=true;$lastSample=0;$execution=['max_concurrent_jobs'=>1,'mode'=>'shared'];
  try{while(true){
-  clearstatcache();if(is_file($root.'/maintenance')||($stopFile!==''&&is_file($stopFile)))$stopping=true;
+  clearstatcache();if(is_file($root.'/runtime-stop')||is_file($root.'/maintenance')||($stopFile!==''&&is_file($stopFile)))$stopping=true;
   foreach($children as$id=>$child){$status=proc_get_status($child['process']);if($status['running'])continue;$output=stream_get_contents($child['stdout']);fclose($child['stdout']);$code=$status['exitcode'];proc_close($child['process']);unset($children[$id]);if(str_contains($output,'"busy":true'))$lastBusy=true;elseif($drain&&$code===0)$stopping=true;}
   if(microtime(true)-$lastSample>=2){$lastSample=microtime(true);$execution=$admission->sample(count($children));}
   if(time()>=$nextUpdate)$updating=true;
-  $advertised=$execution;if($stopping||$updating)$advertised['max_concurrent_jobs']=0;$save($scheduler,['execution'=>$advertised]);
+  $advertised=$execution;if($stopping||$updating||is_file($root.'/admission-drain'))$advertised['max_concurrent_jobs']=0;$save($scheduler,['execution'=>$advertised]);
   if(($stopping||$updating)&&!$children){
    if($stopping)break;
    require_once $directory.'/php/worker.php';require_once $directory.'/php/updater.php';$store=new FleetStore($root);$updater=new FleetUpdater($config,$store,$directory);$result=$updater->check();$nextUpdate=time()+($config['update_poll_seconds']??900);$updating=false;if(($result['state']??'')==='installed')exit(75);continue;
   }
-  if(!$stopping&&!$updating){
+  if(!$stopping&&!$updating&&!is_file($root.'/admission-drain')){
    // Recover retained slots before starting new work, including slots above a reduced budget.
    $ids=range(0,max(0,$execution['max_concurrent_jobs']-1));if($execution['max_concurrent_jobs']===0)$ids=[];
    foreach(glob($root.'/slots/*/state.json')?:[]as$file){try{$state=json_decode(file_get_contents($file),true,512,JSON_THROW_ON_ERROR);if(!empty($state['active'])||!empty($state['outbox']))$ids[]=(int)basename(dirname($file));}catch(Throwable){throw new RuntimeException('slot_state_invalid');}}
