@@ -14,10 +14,13 @@ try {
     $stateDirectory = $config['state_directory'] ?? null;
     if (!is_string($stateDirectory) || $stateDirectory === '') { throw new RuntimeException('state_directory_required'); }
     if (!is_dir($stateDirectory) && !mkdir($stateDirectory, 0700, true) && !is_dir($stateDirectory)) { throw new RuntimeException('state_directory_failed'); }
-    $processLock = fopen($stateDirectory . '/php-worker.lock', 'c+');
+    $managed = ($config['managed_slot'] ?? false) === true;
+    $pool = PHP_OS_FAMILY!=='Windows' && function_exists('proc_open') && !$managed && !in_array('--once',$argv,true) && (!in_array('--drain',$argv,true) || ($config['concurrency']['enabled']??false)===true);
+    $inherited = $managed && ($config['root_lock_inherited']??false)===true;
+    $processLock = $inherited ? fopen('php://fd/3','r+') : fopen($stateDirectory.'/php-worker.lock','c+');
     if ($processLock === false) { throw new RuntimeException('worker_lock_open_failed'); }
     // A competing cron invocation leaves the active process and its state alone.
-    if (!flock($processLock, LOCK_EX | LOCK_NB)) { exit(0); }
+    if (!$inherited && !flock($processLock, LOCK_EX | LOCK_NB)) { exit(0); }
 
     $directory = __DIR__ . '/..';
     $rootVersion = json_decode(file_get_contents($directory . '/VERSION.json'), true, 512, JSON_THROW_ON_ERROR);
@@ -37,6 +40,7 @@ try {
             }
         }
     }
+    if ($pool) { require $directory.'/php/pool.php'; fleet_pool($config,$directory,in_array('--drain',$argv,true),$processLock); return; }
     require $directory . '/php/worker.php';
     require $directory . '/php/updater.php';
     if (!in_array('--once', $argv, true) && !in_array('--drain', $argv, true)) { $config['claim_wait_seconds'] ??= 20; }
@@ -48,7 +52,7 @@ try {
         try {
             $pending = false;
             $busy = $worker->tick();
-            if (time() >= ($worker->store->data['update_check_at'] ?? 0) + ($config['update_poll_seconds'] ?? 900)) {
+            if (!$managed && time() >= ($worker->store->data['update_check_at'] ?? 0) + ($config['update_poll_seconds'] ?? 900)) {
                 $worker->store->data['update_check_at'] = time();
                 $worker->store->save();
                 $update = $updater->check();
@@ -64,6 +68,7 @@ try {
         }
         if (!$busy && !$once && !$drain && ($pending || !$worker->client->waitApplied)) { sleep($config['poll_seconds'] ?? 5); }
     } while (!$once && (!$drain || $busy));
+    if ($managed) echo json_encode(['event'=>'slot_tick','busy'=>$busy])."\n";
 } catch (Throwable $e) {
     $message = $e->getMessage();
     $code = preg_match('/^[a-z][a-z0-9_]*$/D', $message) ? $message : get_class($e);

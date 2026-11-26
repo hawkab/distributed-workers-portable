@@ -140,3 +140,26 @@ Task-only proxy configuration, verified source caches, failover and the native
 process environment contract are described in [PROXY.md](PROXY.md).
 
 Idle workers use commit-driven long polling when the gateway supports it; older gateways retain polling fallback. Control connections are reused. PHP write controls open fresh connections to avoid libcurl silently replaying an uncertain write. Idle wait windows never limit task execution or result streams.
+
+## Adaptive parallelism
+
+Long-running Node and PHP adapters dynamically admit separate execution slots
+under one identity. State for slot zero remains in the existing directory;
+additional state lives under `slots/<number>`. Transport retries and restarts
+retain each slot's checkpoints and completion outbox. Owner work is protected
+by lower OS priority, CPU headroom and memory reserves. Pressure stops new
+admission while productive work drains. Updates wait for all slots to drain.
+
+Private configuration can set `concurrency.mode` to `shared` (default),
+`batch` (idle servers) or `router`. `cpu_per_job_cores` (default 1) and
+`memory_per_job_bytes` (default 134217728) are admission estimates, not job
+execution limits. The initial memory estimate covers the control envelope,
+serialization and a child runtime; operators can set an observed workload
+reservation. Unknown telemetry keeps at most one slot. There is no fixed
+thread-count ceiling; CPU and memory determine capacity.
+
+PHP finite `--once` and legacy `--drain` remain compatible. Setting
+`concurrency.enabled: true` enables the pool for cron `--drain` as well. A
+host disabling child-process creation retains the serial adapter. The parent
+retains the legacy root-state lock, including while slot zero adopts that lock,
+so overlapping cron invocations cannot overwrite active state.

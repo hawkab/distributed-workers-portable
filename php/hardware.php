@@ -22,6 +22,7 @@ function fleet_profile(array $capabilities,string $directory,array $deps=[]):arr
   }
   $usage=$deps['memory_usage']??memory_get_usage(true);$limit=$deps['memory_limit']??ini_get('memory_limit');$processLimit=null;
   if(is_string($limit)&&preg_match('/^\s*(\d+)\s*([KMG]?)\s*$/iD',$limit,$m)){$processLimit=(int)$m[1]*(1024**(array_search(strtoupper($m[2]),['','K','M','G'],true)));if($processLimit<=0)$processLimit=null;}
+  if(($deps['include_process_limits']??true)===false)$processLimit=null;
   $resources['cpu_logical_cores']=$logical;$resources['cpu_available_cores']=$minimum($logical,$available);
   $resources['ram_total_bytes']=$minimum($physical,$memory,$processLimit);$resources['ram_available_bytes']=$minimum($resources['ram_total_bytes'],$free,$headroom,$processLimit!==null?max(0,$processLimit-$usage):null);
   foreach(['disk_total_bytes'=>'disk_total_space','disk_available_bytes'=>'disk_free_space'] as $key=>$function){try{$v=isset($deps[$function])?($deps[$function])($directory):@$function($directory);$resources[$key]=is_numeric($v)&&is_finite((float)$v)&&$v>=0?(int)$v:null;}catch(Throwable){}}

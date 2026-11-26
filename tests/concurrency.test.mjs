@@ -1,0 +1,4 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {budget} from '../node/concurrency.mjs';
+const idle={cores:32,available:20*1024**3,total:24*1024**3,cpu:.03,active:8,previous:8,mode:'batch'};
+test('idle capacity grows gradually; CPU load and memory pressure drain without cancellation',()=>{assert.equal(budget(idle).slots,9);assert.ok(budget({...idle,cpu:.95}).slots<8);assert.equal(budget({...idle,available:1024}).slots,0);assert.equal(budget({...idle,cpu:null}).slots,1);});
+test('shared owner workload reserves more CPU than batch; no fixed thread ceiling',()=>{assert.ok(budget({...idle,active:0,previous:1000,cores:128}).slots>32);assert.ok(budget({...idle,active:0,previous:1000,mode:'shared'}).slots<budget({...idle,active:0,previous:1000}).slots);assert.equal(budget({...idle,cores:.5,active:0,cpu:.01}).slots,1);});

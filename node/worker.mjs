@@ -18,18 +18,19 @@ export class Worker {
  }
  stopAdmission(){this.accepting=false;this.claimController?.abort();}
  async tick() {
-  if(!this.accepting)return false;
+  if(!this.accepting&&!this.store.data.active&&!Object.keys(this.store.data.outbox??{}).length)return false;
   await this.transfer.proxyPool.refresh();this.capabilities=[...new Set([...this.baseCapabilities,...this.commands.capabilities(),...this.transfer.proxyPool.capabilities()])];
-  const profile=()=>this.client.setProfile(collectProfile(this.capabilities,this.store.directory));
+  const profile=()=>this.client.setProfile(this.config.profileProvider?.(this.capabilities,this.store.directory)??collectProfile(this.capabilities,this.store.directory));
   if(!this.client.connected){profile();await this.client.connect(this.store);}
   await this.client.flush(this.store);
   profile();await this.client.request('POST','/v1/workers/heartbeat',{json:{worker_id:this.client.workerId,version_code:this.version.code,version_name:this.version.name,capabilities:this.capabilities,abis:[process.arch],state:'idle'}});
-  if(!this.accepting)return false;
-  this.claimController=new AbortController();const claimed=await this.client.request('POST','/v1/jobs/claim',{json:{worker_id:this.client.workerId,capabilities:this.capabilities},headers:this.config.claim_wait_seconds?{Prefer:'wait='+this.config.claim_wait_seconds}:{},signal:this.claimController.signal});this.claimController=undefined;
+  if(!this.accepting&&!this.store.data.active)return false;
+  this.claimController=new AbortController();const claimed=await this.client.request('POST','/v1/jobs/claim',{json:{worker_id:this.client.workerId,capabilities:this.capabilities,slot_id:this.config.slot_id??0},headers:this.config.claim_wait_seconds?{Prefer:'wait='+this.config.claim_wait_seconds}:{},signal:this.claimController.signal});this.claimController=undefined;
   if(!claimed){if(this.store.data.active){delete this.store.data.active;this.store.save();}return false;}
   await this.execute(claimed.job);await this.client.flush(this.store);return true;
  }
  async execute(job) {
+  this.executing=true;
   const controller=new AbortController();let lease=Date.parse(job.lease_until),progress={},renewing=false;
   const artifacts=new Map(Object.entries(this.store.data.job_artifacts[job.id]??{}));
   if(!Number.isFinite(lease))throw Error('invalid_lease');this.store.data.active={job};this.store.save();
@@ -72,6 +73,6 @@ export class Worker {
    const body={...this.client.identity(job),status,result,artifact_ids:[...new Set([...artifacts.keys(),...Object.keys(this.store.data.job_artifacts[job.id]??{})])],...(error?{error}:{})};
    const completion=await prepareCompletion(this.client,this.store,job,body,{controlBytes:this.config.control_bytes??16777216,chunkBytes:this.config.chunk_bytes??262144,signal:status==='failed'?undefined:controller.signal,progress:p=>{progress=p;}});
    this.store.putCompletion(job,completion);delete this.store.data.active;this.store.save();return completion;
-  } finally {clearInterval(timer);controller.abort();}
+  } finally {this.executing=false;clearInterval(timer);controller.abort();}
  }
 }
