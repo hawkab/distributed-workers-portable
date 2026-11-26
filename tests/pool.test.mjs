@@ -11,7 +11,16 @@ test('two real native jobs coexist, pressure drains them, and admission resumes 
   process=spawn(executable,[script,config],{stdio:['ignore','pipe','pipe']});process.stdout.on('data',b=>{output+=b;if(output.includes('paused'))pausedResolve();});process.stderr.on('data',b=>failure+=b);const exit=new Promise((resolve,reject)=>{process.on('error',reject);process.on('exit',code=>resolve(code));});
   await Promise.race([ready,exit.then(code=>{throw Error('pool_exited_'+code+' '+failure);})]);assert.equal(f.completions.length,0);fs.writeFileSync(pressure,'owner busy');await paused;fs.writeFileSync(release,'finish');
   while(f.completions.length<2)await new Promise(r=>setTimeout(r,20));assert.equal(f.jobs.length,1);assert.equal(new Set(f.completions.map(x=>x.attempt_id)).size,2);
-  const rootState=JSON.parse(fs.readFileSync(path.join(c.state_directory,'state.json')));const secondState=JSON.parse(fs.readFileSync(path.join(c.state_directory,'slots/1/state.json')));assert.equal(rootState.active,undefined);assert.equal(secondState.active,undefined);assert.equal(Object.keys(rootState.outbox).length,0);assert.equal(Object.keys(secondState.outbox).length,0);
+  // The fixture receives completion before its HTTP acknowledgement reaches
+  // the worker. Wait for both durable local acknowledgements, not that earlier
+  // server event, before inspecting the recovered slot states.
+  for (const file of [path.join(c.state_directory,'state.json'),path.join(c.state_directory,'slots/1/state.json')]) {
+   while (true) {
+    const state=JSON.parse(fs.readFileSync(file));
+    if (!state.active && Object.keys(state.outbox??{}).length===0) break;
+    await Promise.race([new Promise(r=>setTimeout(r,20)),exit.then(code=>{throw Error('pool_exited_before_ack_'+code+' '+failure);})]);
+   }
+  }
   fs.unlinkSync(pressure);while(f.completions.length<3)await new Promise(r=>setTimeout(r,20));fs.writeFileSync(path.join(c.state_directory,'runtime-stop'),'stop');assert.equal(await exit,0,failure);assert.equal(new Set(f.completions.map(x=>x.attempt_id)).size,3);assert.equal(f.connections.every(x=>x.profile.execution!==undefined),true);
  }finally{fs.writeFileSync(release,'finish');if(process&&process.exitCode===null)process.kill('SIGTERM');await f.close();fs.rmSync(dir,{recursive:true,force:true});}
 });
