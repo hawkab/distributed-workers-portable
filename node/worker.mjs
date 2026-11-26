@@ -25,7 +25,9 @@ export class Worker {
   await this.client.flush(this.store);
   profile();await this.client.request('POST','/v1/workers/heartbeat',{json:{worker_id:this.client.workerId,version_code:this.version.code,version_name:this.version.name,capabilities:this.capabilities,abis:[process.arch],state:'idle'}});
   if(!this.accepting&&!this.store.data.active)return false;
-  this.claimController=new AbortController();const claimed=await this.client.request('POST','/v1/jobs/claim',{json:{worker_id:this.client.workerId,capabilities:this.capabilities,slot_id:this.config.slot_id??0},headers:this.config.claim_wait_seconds?{Prefer:'wait='+this.config.claim_wait_seconds}:{},signal:this.claimController.signal});this.claimController=undefined;
+  const claimController=new AbortController();this.claimController=claimController;let claimed;
+  try { claimed=await this.client.request('POST','/v1/jobs/claim',{json:{worker_id:this.client.workerId,capabilities:this.capabilities,slot_id:this.config.slot_id??0},headers:this.config.claim_wait_seconds?{Prefer:'wait='+this.config.claim_wait_seconds}:{},signal:claimController.signal}); }
+  finally { if(this.claimController===claimController)this.claimController=undefined; }
   if(!claimed){if(this.store.data.active){delete this.store.data.active;this.store.save();}return false;}
   await this.execute(claimed.job);await this.client.flush(this.store);return true;
  }

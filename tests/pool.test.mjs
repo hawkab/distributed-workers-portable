@@ -24,3 +24,11 @@ test('two real native jobs coexist, pressure drains them, and admission resumes 
   fs.unlinkSync(pressure);while(f.completions.length<3)await new Promise(r=>setTimeout(r,20));fs.writeFileSync(path.join(c.state_directory,'runtime-stop'),'stop');assert.equal(await exit,0,failure);assert.equal(new Set(f.completions.map(x=>x.attempt_id)).size,3);assert.equal(f.connections.every(x=>x.profile.execution!==undefined),true);
  }finally{fs.writeFileSync(release,'finish');if(process&&process.exitCode===null)process.kill('SIGTERM');await f.close();fs.rmSync(dir,{recursive:true,force:true});}
 });
+
+test('aborted idle claim releases the update barrier and can claim again',async()=>{
+ const {Worker}=await import('../node/worker.mjs');const dir=fs.mkdtempSync(path.join(os.tmpdir(),'fleet-claim-abort-'));let reached;const ready=new Promise(r=>reached=r);let held=true;
+ const f=await fixture({routes:async(req,res,p)=>{if(p==='/v1/jobs/claim'&&held){for await(const _ of req){}reached();req.socket.once('close',()=>res.destroy());return true;}return false;}});
+ const w=new Worker({gateway:f.url,token:'fixture',state_directory:dir});w.store.lock();
+ try { const tick=w.tick();const failed=assert.rejects(tick);await ready;w.stopAdmission();await failed;assert.equal(w.claimController,undefined);held=false;w.accepting=true;assert.equal(await w.tick(),false);assert.equal(w.claimController,undefined); }
+ finally{w.store.unlock();await f.close();fs.rmSync(dir,{recursive:true,force:true});}
+});
