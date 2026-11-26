@@ -169,3 +169,10 @@ pauses new work; `runtime-stop` drains productive executions and exits. Removing
 the files permits the supervisor to restart normally. Windows administrators
 can use these controls before stopping a scheduled task, without relying on
 POSIX signals or terminating active native children.
+
+Process admission also reads visible cgroup PID quotas and the account NPROC limit.
+Linux accounts charge OS threads as well as child processes. The scheduler leaves
+the same owner reserve and uses an initial reservation of 16 process/thread units
+per execution; operators can set `concurrency.processes_per_job` from measurements
+of their configured programs. This is an admission estimate, not a runtime limit.
+Already accepted executions continue and admission resumes as the quota frees.

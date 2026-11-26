@@ -1,0 +1,2 @@
+<?php
+require __DIR__.'/../php/processes.php';$files=json_decode(file_get_contents($argv[1]),true);$limits=fleet_process_limits(['platform'=>'Linux','uid'=>1000,'read'=>static fn($p)=>$files[$p]??null,'list'=>static fn($p)=>['11','12','13','sys'],'stat'=>static fn($p)=>['uid'=>str_ends_with($p,'/13')?2000:1000]]);echo json_encode(['limits'=>$limits,'budget'=>fleet_process_budget(20,2,$limits),'exhausted'=>fleet_process_budget(20,0,[['max'=>100,'used'=>95]]),'recovered'=>fleet_process_budget(20,0,[['max'=>100,'used'=>30]])]);
