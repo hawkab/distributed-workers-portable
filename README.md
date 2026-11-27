@@ -3,17 +3,30 @@
 Node.js 24+ runs on Linux, Windows and supported CPU architectures. PHP 8.2+ is a CLI/cron adapter for shared hosting. Both implement `sha256`, `http.request` and streamed binary artifacts. The common text operation uses NFC and Android’s exact whitespace/space-character union; U+0085/U+FEFF remain literal. Both compute operations require a string `input.text`. Node implements `text.normalize`; PHP advertises it only when `intl` is installed. PHP does not advertise JavaScript.
 
 <!-- fleet-architecture:start -->
-## Architecture and repository boundary
+## Architecture
 
-![Shared UML component architecture; worker-portable is highlighted](docs/architecture.png)
+### How a task runs
 
-All six repositories show the same system. **Blue and “THIS REPOSITORY” identify the component owned here**; grey boxes show sibling repositories or external infrastructure. Solid arrows carry runtime traffic, dashed arrows show contracts or reuse, and dotted arrows show deployment or updates. The protocol applies to the gateway and both execution SDKs; deployment arrows show the principal composition entry points.
+![Runtime task flow, API callers and durable stores](docs/architecture.png)
+
+1. An external application submits a task to the gateway API.
+2. A compatible worker claims it; the API assigns a fenced attempt in PostgreSQL and returns the task. The worker renews its lease while running.
+3. The worker uploads binary output and submits its result. Gateway acknowledgements confirm persisted state.
+4. The application reads the canonical result and downloads referenced artifacts.
+
+Workers initiate HTTPS connections. PostgreSQL schedules claims and stores canonical execution state. RabbitMQ is an optional command/event bridge; workers do not pull their tasks from it. The four adapter boxes show implementation types, not a machine count.
+
+### Where this repository fits
+
+![UML package dependencies; this repository is blue](docs/repositories.png)
+
+The **blue package labelled THIS REPOSITORY** is owned here. Dashed arrows point from a package to the contract, SDK or release bundle it uses; they do not represent network calls. `protocol` and `platform` are source/tooling packages, not running services. RouterOS packages the PHP SDK inside its own container rather than calling a separate PHP service.
 
 This repository owns the Node.js and PHP execution adapters: platform operations, resource admission, independent slot state, checkpoints, completion outboxes, binary streams and signed SDK updates. The gateway owns the canonical job ledger.
 
 Implementation: [Node adapter](node/worker.mjs), [PHP adapter](php/worker.php), [Node admission](node/concurrency.mjs), [PHP admission](php/concurrency.php).
 
-[SVG source](docs/architecture.svg) · [Editable DOT source](docs/architecture.dot). The common model and Python-only SVG renderer live in [platform](https://gitflic.ru/project/distributed-workers/platform). From its checkout, `python3 -B tools/render-architecture.py --workspace ../.. --png` regenerates every ownership view in a workspace containing `repos/<component>`. PNG previews work on forges that serve SVG as text. SVG generation uses Python alone; PNG rendering uses a local Chromium browser. No diagram service or production configuration is needed.
+Editable sources: [runtime SVG](docs/architecture.svg), [runtime DOT](docs/architecture.dot), [repository SVG](docs/repositories.svg), [repository DOT](docs/repositories.dot). Both view families come from the shared model in [platform](https://gitflic.ru/project/distributed-workers/platform); each repository changes only the ownership highlight. PNG previews display on all three forges. Regenerate with `python3 -B tools/render-architecture.py --workspace ../.. --png` from the platform checkout. SVG needs Python alone; PNG needs local Chromium and Pillow.
 <!-- fleet-architecture:end -->
 
 Use one backend and a private state directory per installation. A device/enrollment token is enough for a new installation: the first connection assigns a stable server ID and durably saves it before any heartbeat, claim or completion. Existing device tokens retain their IDs; an existing `worker_id` remains supported. Retrying a connection with the same token recovers the same identity after a lost response. Changing identity while local work is pending is refused and preserves its state. Keep the device token and all deployment addresses in an owner-readable configuration outside this repository.
