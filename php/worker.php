@@ -163,7 +163,30 @@ require_once __DIR__.'/command.php';
 final class FleetWorker {
  private FleetClient $client; private float $startedAt; private array $version; public FleetStore $store; private FleetTransfer $transfer; private FleetProxyPool $proxyPool; private FleetCommands $commands; private array $baseCapabilities; public array $capabilities;
  public function __construct(private array $config){if(!extension_loaded('curl'))throw new RuntimeException('curl_extension_required');$this->startedAt=microtime(true);$this->version=json_decode(file_get_contents(__DIR__.'/../VERSION.json'),true,512,JSON_THROW_ON_ERROR);$this->client=new FleetClient($config);if(($config['host_window_seconds']??0)>0)$this->client->runtimeDeadline=$this->startedAt+$config['host_window_seconds'];$this->store=new FleetStore($config['state_directory']);$this->proxyPool=new FleetProxyPool($config,$this->store);$this->commands=new FleetCommands($config,$this->client,$this->store,$this->proxyPool);$config['_proxy_pool']=$this->proxyPool;$this->transfer=new FleetTransfer($this->client,$this->store,$config);$this->capabilities=['sha256','http.request','artifact.stream','runtime.php.v1'];if(class_exists('Normalizer'))$this->capabilities[]='text.normalize';$this->baseCapabilities=$this->capabilities;}
- public function tick():bool{$this->proxyPool->refresh();$this->capabilities=array_values(array_unique(array_merge($this->baseCapabilities,$this->proxyPool->capabilities(),$this->commands->capabilities())));$this->client->leaseDeadline=null;$profile=function():void{$this->client->setProfile(fleet_scheduler_profile(fleet_profile($this->capabilities,$this->config['state_directory']),$this->config));};if(!$this->client->connected){$profile();$this->client->connect($this->store);$this->config['worker_id']=$this->client->config['worker_id'];}$this->client->flush($this->store);$profile();$this->client->request('POST','/v1/workers/heartbeat',['worker_id'=>$this->config['worker_id'],'version_code'=>$this->version['code'],'version_name'=>$this->version['name'],'capabilities'=>$this->capabilities,'abis'=>fleet_abi(),'state'=>'idle']);$claim=$this->client->request('POST','/v1/jobs/claim',['worker_id'=>$this->config['worker_id'],'capabilities'=>$this->capabilities,'slot_id'=>$this->config['slot_id']??0]);if(!$claim){unset($this->store->data['active']);$this->store->save();return false;}$job=$claim['job'];$lease=strtotime($job['lease_until']);$this->client->leaseDeadline=(float)$lease;$this->store->data['active']=['job'=>$job];$this->store->save();$next=0;$began=$this->startedAt;$budget=$this->config['host_window_seconds']??0;$artifactIds=array_keys($this->store->data['job_artifacts'][$job['id']]??[]);
+ // The pool can report its capacity without admitting work or changing its outbox.
+ public function heartbeat(bool $flushPending = false): void {
+  $this->capabilities = array_values(array_unique(array_merge(
+   $this->baseCapabilities, $this->proxyPool->capabilities(), $this->commands->capabilities()
+  )));
+  $this->client->leaseDeadline = null;
+  $refreshProfile = function (): void {
+   $hardware = fleet_profile($this->capabilities, $this->config['state_directory']);
+   $this->client->setProfile(fleet_scheduler_profile($hardware, $this->config));
+  };
+  if (!$this->client->connected) {
+   $refreshProfile();
+   $this->client->connect($this->store);
+   $this->config['worker_id'] = $this->client->config['worker_id'];
+  }
+  if ($flushPending) $this->client->flush($this->store);
+  $refreshProfile();
+  $this->client->request('POST', '/v1/workers/heartbeat', [
+   'worker_id' => $this->config['worker_id'], 'version_code' => $this->version['code'],
+   'version_name' => $this->version['name'], 'capabilities' => $this->capabilities,
+   'abis' => fleet_abi(), 'state' => 'idle'
+  ]);
+ }
+ public function tick():bool{$this->proxyPool->refresh();$this->heartbeat(true);$claim=$this->client->request('POST','/v1/jobs/claim',['worker_id'=>$this->config['worker_id'],'capabilities'=>$this->capabilities,'slot_id'=>$this->config['slot_id']??0]);if(!$claim){unset($this->store->data['active']);$this->store->save();return false;}$job=$claim['job'];$lease=strtotime($job['lease_until']);$this->client->leaseDeadline=(float)$lease;$this->store->data['active']=['job'=>$job];$this->store->save();$next=0;$began=$this->startedAt;$budget=$this->config['host_window_seconds']??0;$artifactIds=array_keys($this->store->data['job_artifacts'][$job['id']]??[]);
   $pulse=function(array $progress=[])use($job,&$lease,&$next,$began,$budget):void{if($budget>0&&microtime(true)-$began>=$budget)throw new FleetPending('actual_host_window_yield');if(time()>=$lease)throw new RuntimeException('lease_expired');if(microtime(true)<$next)return;$next=microtime(true)+min($this->config['heartbeat_seconds']??10,max(0.1,($lease-time())/3));try{$h=$this->client->request('POST','/v1/jobs/'.$job['id'].'/heartbeat',$this->client->identity($job)+['progress'=>$progress]);if($h['cancel_requested']??false)throw new RuntimeException('cancelled');$lease=strtotime($h['lease_until']);$this->client->leaseDeadline=(float)$lease;}catch(FleetPending $e){if(time()>=$lease)throw new RuntimeException('lease_expired');}};
   $this->client->leasePulse=$pulse;try{
   $status='succeeded';$result=null;$error=null;

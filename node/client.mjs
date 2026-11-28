@@ -22,13 +22,13 @@ export async function readBounded(response,maxBytes){const chunks=[];let n=0;for
 export class Client {
  constructor(config){this.base=config.gateway.replace(/\/+$/,'');this.workerId=config.worker_id;this.token=config.token;this.controlBytes=config.control_bytes??16*1024*1024;this.controlIdleMs=config.control_idle_ms??30000;}
  setProfile(profile){this.profile=encodeProfile(profile);}
- async connect(store){
+ async connect(store,{signal}={}){
   const persisted=store.data.worker_identity?.worker_id;const pendingIds=[...new Set(Object.values(store.data.outbox??{}).map(v=>v.body?.worker_id).filter(v=>typeof v==='string'&&v))];
   const previous=persisted??this.workerId??(pendingIds.length===1?pendingIds[0]:undefined);
   const pending=Object.keys(store.data.outbox??{}).length>0||!!store.data.active||['transfers','checkpoints','job_artifacts','completion_transfers','command_runs'].some(k=>Object.keys(store.data[k]??{}).length>0);
   if(pending&&(!previous||pendingIds.some(id=>id!==previous)))throw Error('pending_worker_identity_unknown_or_conflicting');
   if(previous)this.workerId=previous;
-  const receipt=await this.request('POST','/v1/workers/connect',{json:{}});
+  const receipt=await this.request('POST','/v1/workers/connect',{json:{},signal});
   if(!receipt||typeof receipt.worker_id!=='string'||!receipt.worker_id)throw Error('invalid_connect_receipt');
   if(previous&&receipt.worker_id!==previous&&pending)throw Error('worker_identity_changed_with_pending_work');
   const identity={worker_id:receipt.worker_id};store.data.worker_identity=identity;store.save();this.workerId=identity.worker_id;this.connected=true;

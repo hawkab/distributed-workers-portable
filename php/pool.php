@@ -9,6 +9,10 @@ function fleet_pool(array $config,string $directory,bool $drain=false,$rootLock=
  if(function_exists('pcntl_async_signals')){pcntl_async_signals(true);foreach([SIGINT,SIGTERM]as$sig)pcntl_signal($sig,static function()use(&$stopping):void{$stopping=true;});}
  $save=static function(string $file,array $data):void{$temp=$file.'.'.bin2hex(random_bytes(8));file_put_contents($temp,json_encode($data,JSON_THROW_ON_ERROR));chmod($temp,0600);rename($temp,$file);};
  $scheduler=$root.'/scheduler.json';$lastScheduler=null;$lastBusy=true;$lastSample=0;$execution=['max_concurrent_jobs'=>1,'mode'=>'shared'];
+ $presence = null;
+ $presenceInterval = (float) ($config['heartbeat_seconds'] ?? 10);
+ if ($presenceInterval <= 0) $presenceInterval = 10;
+ $nextPresence = 0;
  try{while(true){
   clearstatcache();if(is_file($root.'/runtime-stop')||is_file($root.'/maintenance')||($stopFile!==''&&is_file($stopFile)))$stopping=true;
   foreach($children as$id=>$child){$status=proc_get_status($child['process']);if($status['running'])continue;$output=stream_get_contents($child['stdout']);fclose($child['stdout']);$code=$status['exitcode'];proc_close($child['process']);unset($children[$id]);if(str_contains($output,'"busy":true'))$lastBusy=true;elseif($drain&&$code===0)$stopping=true;}
@@ -24,6 +28,22 @@ function fleet_pool(array $config,string $directory,bool $drain=false,$rootLock=
    $ids=range(0,max(0,$execution['max_concurrent_jobs']-1));if($execution['max_concurrent_jobs']===0)$ids=[];
    foreach(glob($root.'/slots/*/state.json')?:[]as$file){try{$state=json_decode(file_get_contents($file),true,512,JSON_THROW_ON_ERROR);if(!empty($state['active'])||!empty($state['outbox']))$ids[]=(int)basename(dirname($file));}catch(Throwable){throw new RuntimeException('slot_state_invalid');}}
    foreach(array_unique($ids)as$id){if(isset($children[$id]))continue;$state=$id===0?$root:$root.'/slots/'.$id;if(!is_dir($state))mkdir($state,0700,true);$childConfig=$config;$childConfig['state_directory']=$state;$childConfig['slot_id']=$id;$childConfig['scheduler_file']=$scheduler;$childConfig['managed_slot']=true;$childConfig['root_lock_inherited']=$id===0;$childConfig['claim_wait_seconds']=20;$file=$state.'/slot.local.json';$save($file,$childConfig);$pipes=[];$descriptors=[0=>['file',PHP_OS_FAMILY==='Windows'?'NUL':'/dev/null','r'],1=>['pipe','w'],2=>STDERR];if($id===0){if(!is_resource($rootLock))throw new RuntimeException('root_lock_required');$descriptors[3]=$rootLock;}$process=proc_open([PHP_BINARY,$directory.'/php/bootstrap.php',$file,'--once'],$descriptors,$pipes,null,null,['bypass_shell'=>true]);if(!is_resource($process))throw new RuntimeException('slot_start_failed');stream_set_blocking($pipes[1],false);$children[$id]=['process'=>$process,'stdout'=>$pipes[1]];}
+  }
+  if (!$children && !$stopping && !$updating && $advertised['max_concurrent_jobs'] === 0) {
+   if (microtime(true) >= $nextPresence) {
+    try {
+     $presence ??= new FleetWorker(array_merge($config, ['scheduler_file' => $scheduler]));
+     $presence->heartbeat();
+    } catch (FleetPending|FleetHTTPFailure $error) {
+     $presence = null;
+     fwrite(STDERR, json_encode(['event' => 'worker_presence_pending', 'code' => $error->getMessage()]) . "\n");
+    }
+    $nextPresence = microtime(true) + $presenceInterval;
+   }
+  } else {
+   // A slot can change the root store while it runs. Reopen it at the next pause.
+   $presence = null;
+   $nextPresence = 0;
   }
   usleep(100000);
  }}finally{fclose($lock);}

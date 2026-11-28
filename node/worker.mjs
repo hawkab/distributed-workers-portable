@@ -17,13 +17,17 @@ export class Worker {
   this.baseCapabilities=[...this.capabilities];
  }
  stopAdmission(){this.accepting=false;this.claimController?.abort();}
+ async heartbeat({flushOutbox=false,signal}={}) {
+  this.capabilities=[...new Set([...this.baseCapabilities,...this.commands.capabilities(),...this.transfer.proxyPool.capabilities()])];
+  const profile=()=>this.client.setProfile(this.config.profileProvider?.(this.capabilities,this.store.directory)??collectProfile(this.capabilities,this.store.directory));
+  if(!this.client.connected){profile();await this.client.connect(this.store,{signal});}
+  if(flushOutbox)await this.client.flush(this.store);
+  profile();await this.client.request('POST','/v1/workers/heartbeat',{json:{worker_id:this.client.workerId,version_code:this.version.code,version_name:this.version.name,capabilities:this.capabilities,abis:[process.arch],state:'idle'},signal});
+ }
  async tick() {
   if(!this.accepting&&!this.store.data.active&&!Object.keys(this.store.data.outbox??{}).length)return false;
-  await this.transfer.proxyPool.refresh();this.capabilities=[...new Set([...this.baseCapabilities,...this.commands.capabilities(),...this.transfer.proxyPool.capabilities()])];
-  const profile=()=>this.client.setProfile(this.config.profileProvider?.(this.capabilities,this.store.directory)??collectProfile(this.capabilities,this.store.directory));
-  if(!this.client.connected){profile();await this.client.connect(this.store);}
-  await this.client.flush(this.store);
-  profile();await this.client.request('POST','/v1/workers/heartbeat',{json:{worker_id:this.client.workerId,version_code:this.version.code,version_name:this.version.name,capabilities:this.capabilities,abis:[process.arch],state:'idle'}});
+  await this.transfer.proxyPool.refresh();
+  await this.heartbeat({flushOutbox:true});
   if(!this.accepting&&!this.store.data.active)return false;
   const claimController=new AbortController();this.claimController=claimController;let claimed;
   try { claimed=await this.client.request('POST','/v1/jobs/claim',{json:{worker_id:this.client.workerId,capabilities:this.capabilities,slot_id:this.config.slot_id??0},headers:this.config.claim_wait_seconds?{Prefer:'wait='+this.config.claim_wait_seconds}:{},signal:claimController.signal}); }
