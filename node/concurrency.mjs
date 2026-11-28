@@ -27,8 +27,14 @@ export class Admission {
   if(this.last&&sum.total>this.last.total)cpu=Math.max(0,Math.min(1,1-(sum.idle-this.last.idle)/(sum.total-this.last.total)));
   // Container quotas are smaller than host /proc CPU totals. Include visible cgroup usage.
   try{const group=fs.readFileSync('/proc/self/cgroup','utf8').split('\n').find(x=>x.startsWith('0::'))?.slice(3)??'/';for(const d of new Set(['/sys/fs/cgroup',path.posix.join('/sys/fs/cgroup',group)])){let q=fs.readFileSync(d+'/cpu.max','utf8').trim().split(/\s+/);if(q[0]==='max')continue;const usage=Number(fs.readFileSync(d+'/cpu.stat','utf8').match(/^usage_usec (\d+)/m)?.[1]);const prior=this.last?.groups?.[d];sum.groups??={};sum.groups[d]=usage;if(prior!==undefined&&usage>=prior&&this.last&&cpu!==null){const elapsed=Number(now-this.last.now)/1e9;cpu=Math.max(cpu,Math.min(1,(usage-prior)/1e6/elapsed/(Number(q[0])/Number(q[1]))));}}}catch{}
-  this.last={...sum,now};const profile=collectProfile([],this.directory);const r=profile.resources;const c=this.config.concurrency??{};const b=budget({cores:r.cpu_available_cores,available:r.ram_available_bytes,total:r.ram_total_bytes,cpu,active,previous:this.previous,mode:c.mode??'shared',memoryPerJob:c.memory_per_job_bytes??128*1024*1024,cpuPerJob:c.cpu_per_job_cores??1});b.slots=processBudget(b.slots,active,processLimits(),{perJob:c.processes_per_job??16,reserveFraction:(c.mode??'shared')==='batch'?.15:.25});this.previous=b.slots;this.execution={max_concurrent_jobs:b.slots,mode:b.mode,cpu_utilization:b.cpu_utilization,memory_reserve_bytes:b.memory_reserve_bytes};return this.execution;
+  this.last={...sum,now};const profile=this.resourceSample=collectProfile([],this.directory);const r=profile.resources;const c=this.config.concurrency??{};const b=budget({cores:r.cpu_available_cores,available:r.ram_available_bytes,total:r.ram_total_bytes,cpu,active,previous:this.previous,mode:c.mode??'shared',memoryPerJob:c.memory_per_job_bytes??128*1024*1024,cpuPerJob:c.cpu_per_job_cores??1});const perJob=c.processes_per_job??16,reserveFraction=(c.mode??'shared')==='batch'?.15:.25;
+  const limits=processLimits({headroom:{needed:Math.max(0,b.slots-active)*perJob,reserveFraction}});
+  b.slots=processBudget(b.slots,active,limits,{perJob,reserveFraction});this.previous=b.slots;this.execution={max_concurrent_jobs:b.slots,mode:b.mode,cpu_utilization:b.cpu_utilization,memory_reserve_bytes:b.memory_reserve_bytes};return this.execution;
  }
- profile(capabilities,directory){return {...collectProfile(capabilities,directory),execution:this.execution};}
+ profile(capabilities,directory){let sampled=this.resourceSample;
+  if(sampled && directory!==this.directory){
+   try{if(fs.statSync(directory).dev!==fs.statSync(this.directory).dev)sampled=null;}catch{sampled=null;}
+  }
+  return {...(sampled??collectProfile([],directory)),capabilities:[...capabilities],execution:this.execution};}
 }
 export function lowerPriority(){try{os.setPriority(0,os.constants.priority.PRIORITY_BELOW_NORMAL);}catch{}}

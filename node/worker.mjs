@@ -78,7 +78,7 @@ export class Worker {
    }
    const body={...this.client.identity(job),status,result,artifact_ids:[...new Set([...artifacts.keys(),...Object.keys(this.store.data.job_artifacts[job.id]??{})])],...(error?{error}:{})};
    const completion=await prepareCompletion(this.client,this.store,job,body,{controlBytes:this.config.control_bytes??16777216,chunkBytes:this.config.chunk_bytes??262144,signal:status==='failed'?undefined:controller.signal,progress:p=>{progress=p;}});
-   this.store.putCompletion(job,completion);delete this.store.data.active;this.store.save();return completion;
+   this.store.putCompletion(job,completion);return completion;
   } finally {this.executing=false;clearInterval(timer);controller.abort();}
  }
 }

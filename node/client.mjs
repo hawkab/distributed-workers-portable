@@ -31,7 +31,7 @@ export class Client {
   const receipt=await this.request('POST','/v1/workers/connect',{json:{},signal});
   if(!receipt||typeof receipt.worker_id!=='string'||!receipt.worker_id)throw Error('invalid_connect_receipt');
   if(previous&&receipt.worker_id!==previous&&pending)throw Error('worker_identity_changed_with_pending_work');
-  const identity={worker_id:receipt.worker_id};store.data.worker_identity=identity;store.save();this.workerId=identity.worker_id;this.connected=true;
+  const identity={worker_id:receipt.worker_id};if(persisted!==identity.worker_id){store.data.worker_identity=identity;store.save();}this.workerId=identity.worker_id;this.connected=true;
   return receipt;
  }
  identity(job){return {worker_id:this.workerId,attempt_id:job.attempt_id,fencing_token:job.fencing_token};}

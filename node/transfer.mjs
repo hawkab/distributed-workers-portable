@@ -26,6 +26,7 @@ export class Transfer {
   if(!state.upload_id){const created=await this.client.request('POST','/v1/jobs/'+job.id+'/artifacts',{json:{...identity,key:input.effect_id+'/'+executionId+'/'+state.generation,...(input.response.name?{name:input.response.name}:{}),media_type:input.response.media_type??'application/octet-stream'},signal});state.upload_id=created.upload_id;this.store.save();}
   const status=await this.client.request('GET','/v1/artifacts/'+state.upload_id+'/status',{job,signal});if(status.cancel_requested)throw new Error('cancelled');let offset=status.offset??0;
   if(offset>0&&!state.validator){await this.restartUpload(job,state,signal);return this.execute(job,raw,{signal,progress,executionId});}
+  const startedAtZero=offset===0;
   const headers={...input.headers};if(!Object.keys(headers).some(x=>x.toLowerCase()==='accept-encoding'))headers['Accept-Encoding']='identity';
   if(input.replay==='idempotent'&&input.idempotency_key)headers[input.idempotency_header??'Idempotency-Key']=input.idempotency_key;
   if(offset>0){headers.Range='bytes='+offset+'-';headers['If-Range']=state.validator;}
@@ -37,18 +38,25 @@ export class Transfer {
   try{for await(const chunk of sourceChunks(source,input.timeouts?.read_idle_ms??0)){let start=0;while(start<chunk.length){const n=Math.min(this.chunkBytes-used,chunk.length-start);chunk.copy(buffer,used,start,start+n);used+=n;start+=n;this.peakBufferedBytes=Math.max(this.peakBufferedBytes,used+chunk.length);if(used===this.chunkBytes)await send();}}await send();}catch(e){source.destroy();throw e;}
   const artifact=await this.client.request('POST','/v1/artifacts/'+state.upload_id+'/finish',{json:{...identity,length:offset},signal});if(!artifact.artifact_id||artifact.length!==offset||!/^[a-f0-9]{64}$/.test(artifact.sha256))throw new Error('invalid_artifact_receipt');
   const result={...responseMeta,artifact:{artifact_id:artifact.artifact_id,length:artifact.length,sha256:artifact.sha256,media_type:artifact.media_type??input.response.media_type??source.headers['content-type']??'application/octet-stream',...(input.response.name?{name:input.response.name}:{})}};
-  state.result=result;this.store.save();await this.finishEffect(job,input,state,result,signal);return this.view(job,input,result,signal);
+  state.result=result;this.store.save();await this.finishEffect(job,input,state,result,signal);
+  const inline=startedAtZero && offset<=buffer.length && input.response.mode!=='artifact' && offset<=input.response.max_bytes?buffer.subarray(0,offset):undefined;
+  return this.view(job,input,result,signal,inline);
  }
  effectPath(job,input){return '/v1/jobs/'+job.id+'/effects/'+encodeURIComponent(input.effect_id);}
  async finishEffect(job,input,state,result,signal){try{const receipt=await this.client.request('POST',this.effectPath(job,input)+'/finish',{json:{...this.client.identity(job),execution_id:state.execution_id,request_sha256:state.request_sha256,response:result,artifact_ids:result.artifact?[result.artifact.artifact_id]:[]},signal});if(receipt.recorded!==true&&!receipt.candidate_saved)throw new Error('effect_finish_not_recorded');}catch(e){if(e.status>=400&&e.status<500&&![401,403,408,429].includes(e.status)){state.effect_quarantine={status:e.status,response:e.body};this.store.save();e.artifact=result.artifact;e.responseResult=result;}throw e;}}
  async restartUpload(job,state,signal){await this.client.request('POST','/v1/artifacts/'+state.upload_id+'/abort',{json:this.client.identity(job),signal});state.generation++;delete state.upload_id;delete state.validator;delete state.response_meta;this.store.save();}
- async view(job,input,result,signal){
+ async view(job,input,result,signal,inline){
   if(input.response.mode==='artifact')return result;
   if(result.artifact.length>input.response.max_bytes)return {...result,body_error:{code:'inline_limit_exceeded'}};
+  let bytes=inline;
+  if(bytes!==undefined && crypto.createHash('sha256').update(bytes).digest('hex')!==result.artifact.sha256)throw Error('inline_artifact_integrity_mismatch');
+  if(bytes===undefined){
   const content=await open('GET',this.client.base+'/v1/artifacts/'+result.artifact.artifact_id+'/content',{headers:this.client.headers(job),signal});
   if(content.statusCode!==200){content.destroy();throw new Error('inline_artifact_unavailable');}
   const parts=[];let n=0;for await(const part of content){n+=part.length;if(n>input.response.max_bytes){content.destroy();return {...result,body_error:{code:'inline_limit_exceeded'}};}parts.push(part);}
-  let text;try{text=new TextDecoder('utf-8',{fatal:true}).decode(Buffer.concat(parts,n));}catch{return {...result,body_error:{code:'invalid_utf8'}};}
+   bytes=Buffer.concat(parts,n);
+  }
+  let text;try{text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);}catch{return {...result,body_error:{code:'invalid_utf8'}};}
   if(input.response.mode==='text')return {...result,body_text:text};
   try{return {...result,body_json:JSON.parse(text)};}catch{return {...result,body_error:{code:'invalid_json'}};}
  }

@@ -38,7 +38,7 @@ export class Commands {
   if(!emptyNetwork(job.network)||!emptyNetwork(this.network))throw Error('command_network_policy_not_enforceable');
   const program=validate(this.programs[input.program]);if(this.proxyPool.mode==='required'&&program.proxy_env!==true)throw Error('command_proxy_environment_not_enabled');
   if(signal?.aborted)throw signal.reason??Error('cancelled');
-  this.store.data.command_runs??={};const key=job.attempt_id,identity=this.client.identity(job);
+  this.store.data.command_runs??={};const key=job.attempt_id;
   const fingerprint=crypto.createHash('sha256').update(JSON.stringify({program:input.program,sha256:program.sha256,argv:program.argv??[],env:program.env??{},payload:input.payload})).digest('hex');
   let state=this.store.data.command_runs[key];
   if(state?.fingerprint&&state.fingerprint!==fingerprint)throw Error('command_pending_input_changed');
@@ -52,7 +52,7 @@ export class Commands {
   }
   const selected=program.proxy_env===true?this.proxyPool.select():null;
   state={...state,...(selected?{proxy_id:selected.id}:{}),job_id:job.id,attempt_id:job.attempt_id,fingerprint,program:input.program,phase:'prepared',execution_id:crypto.randomUUID(),generation:state?.generation??0};this.store.data.command_runs[key]=state;this.store.save();
-  if(!state.upload_id){const created=await retry(()=>this.client.request('POST','/v1/jobs/'+encodeURIComponent(job.id)+'/artifacts',{json:{...identity,key:'command/'+key+'/'+state.execution_id,name:program.name??'stdout.bin',media_type:program.media_type??'application/octet-stream'}}),signal);state.upload_id=created.upload_id;this.store.save();}
+  if(!job.sealed_artifact_put)await this.openUpload(job,state,program,signal);
   if(signal?.aborted)throw signal.reason??Error('cancelled');
   state.phase='started';this.store.save();
   const env={...(process.platform==='win32'&&process.env.SystemRoot?{SystemRoot:process.env.SystemRoot}:{}),...(program.env??{}),...this.proxyPool.environment(selected)};
@@ -71,7 +71,7 @@ export class Commands {
   const stdin=(async()=>{try{for(const bytes of encodedJSON(input.payload)){if(!child.stdin.write(bytes))await once(child.stdin,'drain');}child.stdin.end();await finished(child.stdin);}catch(error){stdinFailure=error;if(!['EPIPE','ERR_STREAM_DESTROYED','ERR_STREAM_WRITE_AFTER_END','ABORT_ERR'].includes(error.code))throw error;}})();
   let outcome;
   try{
-   const output=this.capture(job,state,child.stdout,progress,signal).catch(error=>{kill();throw error;});
+   const output=this.capture(job,state,child.stdout,progress,signal,program).catch(error=>{kill();throw error;});
    const results=await Promise.allSettled([output,closed,stderr,stdin]);outcome=results[1].value;
    if(selected){let text=tail.toString();for(const secret of [this.proxyPool.environment(selected).FLEET_TASK_PROXY_URL,selected.password,selected.username].filter(Boolean))text=text.split(secret).join('[redacted]');tail=Buffer.from(text).subarray(-stderrBudget);}
    state.exit_recorded=true;state.exit_code=outcome.code;state.signal=outcome.terminated;state.stderr={tail_base64:tail.toString('base64'),bytes:stderrBytes,retained_bytes:tail.length,truncated:stderrBytes>tail.length};
@@ -81,16 +81,33 @@ export class Commands {
    return await this.finish(job,state,program,signal);
   }finally{signal?.removeEventListener('abort',abort);process.removeListener('exit',onExit);if(!outcome)kill();}
  }
- async capture(job,state,stream,progress,signal){
+ artifactOptions(job,state,program) {
+  return {key:'command/'+job.attempt_id+'/'+state.execution_id,name:program.name??'stdout.bin',media_type:program.media_type??'application/octet-stream'};
+ }
+ async openUpload(job,state,program,signal) {
+  if(state.upload_id)return;
+  const created=await retry(()=>this.client.request('POST','/v1/jobs/'+encodeURIComponent(job.id)+'/artifacts',{json:{...this.client.identity(job),...this.artifactOptions(job,state,program)}}),signal);
+  state.upload_id=created.upload_id;
+  this.store.save();
+ }
+ async capture(job,state,stream,progress,signal,program){
   const digest=crypto.createHash('sha256');let offset=0,used=0;const buffer=Buffer.allocUnsafe(this.chunkBytes);
   const send=async()=>{if(!used)return;const bytes=buffer.subarray(0,used),start=offset;const ack=await retry(()=>this.client.request('PUT','/v1/artifacts/'+encodeURIComponent(state.upload_id)+'/chunks/'+start,{body:bytes,headers:{'Content-Type':'application/octet-stream'},job}),signal);if(ack.offset!==start||ack.next_offset!==start+used)throw Error('command_chunk_ack_mismatch');digest.update(bytes);offset+=used;state.offset=offset;this.store.save();progress({phase:'command_stdout',bytes:offset});used=0;};
-  for await(const bytes of stream){let start=0;while(start<bytes.length){const count=Math.min(this.chunkBytes-used,bytes.length-start);bytes.copy(buffer,used,start,start+count);used+=count;start+=count;if(used===this.chunkBytes)await send();}}
-  await send();state.stdout_complete=true;state.length=offset;state.sha256=digest.digest('hex');this.store.save();
+  for await(const bytes of stream){let start=0;while(start<bytes.length){const count=Math.min(this.chunkBytes-used,bytes.length-start);bytes.copy(buffer,used,start,start+count);used+=count;start+=count;if(used===this.chunkBytes){await this.openUpload(job,state,program,signal);await send();}}}
+  if(!state.upload_id && job.sealed_artifact_put){
+   const bytes=buffer.subarray(0,used),sha=crypto.createHash('sha256').update(bytes).digest('hex');
+   const {key,name,media_type}=this.artifactOptions(job,state,program);
+   const query=new URLSearchParams({key,name,sha256:sha});
+   const artifact=await retry(()=>this.client.request('PUT','/v1/jobs/'+encodeURIComponent(job.id)+'/artifacts/content?'+query,{body:bytes,headers:{'Content-Length':String(bytes.length),'Content-Type':media_type},job}),signal);
+   if(artifact.length!==bytes.length || artifact.sha256!==sha || typeof artifact.artifact_id!=='string')throw Error('command_artifact_integrity_mismatch');
+   state.sealed_artifact=artifact;state.upload_id=artifact.artifact_id;state.offset=offset=used;digest.update(bytes);
+  }else{await send();}
+  state.stdout_complete=true;state.length=offset;state.sha256=digest.digest('hex');this.store.save();
  }
  async finish(job,state,program,signal){
-  const artifact=await retry(()=>this.client.request('POST','/v1/artifacts/'+encodeURIComponent(state.upload_id)+'/finish',{json:{...this.client.identity(job),length:state.length,sha256:state.sha256}}),signal);
+  const artifact=state.sealed_artifact??await retry(()=>this.client.request('POST','/v1/artifacts/'+encodeURIComponent(state.upload_id)+'/finish',{json:{...this.client.identity(job),length:state.length,sha256:state.sha256}}),signal);
   if(artifact.length!==state.length||artifact.sha256!==state.sha256||typeof artifact.artifact_id!=='string')throw Error('command_artifact_integrity_mismatch');
-  const result={artifact,exit_code:state.exit_code,stderr:state.stderr??{tail_base64:'',bytes:0,retained_bytes:0,truncated:false},...(state.signal?{signal:state.signal}:{}),...(state.error_code?{error_code:state.error_code}:{})};state.result=result;state.phase='finished';this.store.rememberArtifact(job,artifact);this.store.save();
+  const result={artifact,exit_code:state.exit_code,stderr:state.stderr??{tail_base64:'',bytes:0,retained_bytes:0,truncated:false},...(state.signal?{signal:state.signal}:{}),...(state.error_code?{error_code:state.error_code}:{})};state.result=result;state.phase='finished';this.store.rememberArtifact(job,artifact);
   if(state.proxy_id&&program.replay==='safe'&&(program.proxy_failure_exit_codes??[]).includes(result.exit_code)){const e=failure('proxy_unavailable',result);e.code='PROXY_RETRY';throw e;}if(result.exit_code!==0||result.signal||result.error_code)throw failure(result.error_code??'command_exit_nonzero',result);return result;
  }
 }
