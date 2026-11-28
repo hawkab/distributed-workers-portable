@@ -33,7 +33,9 @@ function fleet_pool(array $config,string $directory,bool $drain=false,$rootLock=
    if (microtime(true) >= $nextPresence) {
     try {
      $presence ??= new FleetWorker(array_merge($config, ['scheduler_file' => $scheduler]));
-     $presence->heartbeat();
+     // Slot zero shares the root store. Deliver its persisted completion even
+     // while the scheduler admits no new calculations. No child owns it here.
+     $presence->heartbeat(true);
     } catch (FleetPending|FleetHTTPFailure $error) {
      $presence = null;
      fwrite(STDERR, json_encode(['event' => 'worker_presence_pending', 'code' => $error->getMessage()]) . "\n");

@@ -6,6 +6,10 @@ test('PHP pool keeps root lock, uses two durable slots, drains under pressure, a
  try{
   const pressure = path.join(state, 'pressure');
   fs.writeFileSync(pressure, 'owner work');
+  const recovered = 'already-finished-attempt';
+  fs.writeFileSync(path.join(state, 'state.json'), JSON.stringify({outbox:{
+    [recovered]:{job_id:'already-finished',body:{worker_id:'w',attempt_id:recovered,fencing_token:1,status:'succeeded',result:{value:17}}}
+  }}));
   const idlePulses = () => f.profileHeaders.filter(h =>
     h.path === '/v1/workers/heartbeat' && h.profile.execution?.max_concurrent_jobs === 0
   ).length;
@@ -16,15 +20,17 @@ test('PHP pool keeps root lock, uses two durable slots, drains under pressure, a
   await t.waitFor(() => assert.ok(idlePulses() >= 2), {timeout: 15000});
   assert.equal(claimCount(), 0);
   assert.equal(started, 0);
+  assert.deepEqual(f.completions.map(x=>x.attempt_id),[recovered]);
+  assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(path.join(state,"state.json"))).outbox),[]);
   assert.ok(f.workerHeartbeats.every(h => h.worker_id === 'w' && h.state === 'idle' && h.capabilities.includes('sha256')));
   fs.unlinkSync(pressure);
-  await Promise.race([ready,exit.then(code=>{throw Error('php_pool_exited_'+code+' '+stderr);})]);assert.equal(f.completions.length,0);fs.writeFileSync(pressure,'owner work');await t.waitFor(() => assert.equal(JSON.parse(fs.readFileSync(path.join(state,'scheduler.json'))).execution.max_concurrent_jobs,0),{timeout:15000});releaseSource();
-  while(f.completions.length<2)await new Promise(r=>setTimeout(r,20));assert.equal(f.jobs.length,1);
+  await Promise.race([ready,exit.then(code=>{throw Error('php_pool_exited_'+code+' '+stderr);})]);assert.equal(f.completions.length,1);fs.writeFileSync(pressure,'owner work');await t.waitFor(() => assert.equal(JSON.parse(fs.readFileSync(path.join(state,'scheduler.json'))).execution.max_concurrent_jobs,0),{timeout:15000});releaseSource();
+  while(f.completions.length<3)await new Promise(r=>setTimeout(r,20));assert.equal(f.jobs.length,1);
   while([state,path.join(state,'slots/1')].some(d=>Object.keys(JSON.parse(fs.readFileSync(path.join(d,'state.json'))).outbox).length))await new Promise(r=>setTimeout(r,20));
   const beforeIdle=idlePulses(), beforeClaims=claimCount();
   await t.waitFor(() => assert.ok(idlePulses() >= beforeIdle + 2), {timeout: 15000});
   assert.equal(claimCount(),beforeClaims);
-  fs.unlinkSync(pressure);while(f.completions.length<3)await new Promise(r=>setTimeout(r,20));fs.writeFileSync(path.join(state,'maintenance'),'stop');assert.equal(await exit,0,stderr);assert.equal(new Set(f.completions.map(x=>x.attempt_id)).size,3);assert.equal(started,3);
+  fs.unlinkSync(pressure);while(f.completions.length<4)await new Promise(r=>setTimeout(r,20));fs.writeFileSync(path.join(state,'maintenance'),'stop');assert.equal(await exit,0,stderr);assert.equal(new Set(f.completions.map(x=>x.attempt_id)).size,4);assert.equal(started,3);
   const beforeMaintenance = f.profileHeaders.length;
   const offline = spawn(process.env.PHP_BINARY ?? 'docker', args, {stdio:'ignore'});
   await new Promise((resolve,reject) => {
